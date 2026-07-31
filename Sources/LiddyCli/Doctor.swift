@@ -20,12 +20,12 @@ enum Doctor {
         let isOnPath = (ProcessInfo.processInfo.environment["PATH"] ?? "")
             .split(separator: ":")
             .contains { FileManager.default.isExecutableFile(atPath: "\($0)/liddy") }
-        line(isOnPath, "on PATH", isOnPath ? "yes" : "no — run Script/install-cli.sh")
+        line(isOnPath, "on PATH", isOnPath ? "yes" : "no. Run Script/install-cli.sh")
 
         print("\nApp")
         let socketPath = LiddyPath.appSocket.path
         let isSocketPresent = FileManager.default.fileExists(atPath: socketPath)
-        line(isSocketPresent, "socket", isSocketPresent ? socketPath : "missing — is Liddy.app running?")
+        line(isSocketPresent, "socket", isSocketPresent ? socketPath : "missing. Is Liddy.app running?")
 
         if isSocketPresent {
             let client = LineSocketClient(path: socketPath)
@@ -37,13 +37,13 @@ enum Doctor {
                 line(nil, "battery", snap.battery.display)
                 line(nil, "thermal", snap.thermal.level.display)
             } else {
-                line(false, "responding", "socket exists but no reply — stale socket?")
+                line(false, "responding", "socket exists but no reply. Stale socket?")
             }
         }
 
         print("\nHelper (needed only for closed-lid)")
         let isBinaryPresent = FileManager.default.fileExists(atPath: "/usr/local/libexec/liddy-helper")
-        line(isBinaryPresent, "installed", isBinaryPresent ? "/usr/local/libexec/liddy-helper" : "no — Script/install-helper.sh")
+        line(isBinaryPresent, "installed", isBinaryPresent ? "/usr/local/libexec/liddy-helper" : "no. Run Script/install-helper.sh")
         let isHelperSocketPresent = FileManager.default.fileExists(atPath: LiddyPath.helperSocketPath)
         line(isHelperSocketPresent, "running", isHelperSocketPresent ? LiddyPath.helperSocketPath : "not running")
 
@@ -59,10 +59,9 @@ enum Doctor {
         }
 
         print("\nSystem")
-        // `pmset -g` omits disablesleep entirely when it is 0, so absent means
-        // normal sleep — it is not an inconclusive reading.
-        if pmsetDisableSleep() {
-            line(false, "disablesleep", "1 — YOUR MAC CANNOT SLEEP")
+        let pmsetText = PmsetReader.output()
+        if PmsetReader.isDisableSleepOn(pmsetText) {
+            line(false, "disablesleep", "1. YOUR MAC CANNOT SLEEP")
             if !isHelperSocketPresent {
                 print("""
 
@@ -73,11 +72,14 @@ enum Doctor {
                 """)
             }
         } else {
-            line(true, "disablesleep", "not set — normal sleep")
+            line(true, "disablesleep", "not set, normal sleep")
         }
 
-        let holder = sleepAssertionHolder()
+        let holder = PmsetReader.assertionHolder(pmsetText)
         line(nil, "keeping awake", holder.isEmpty ? "nothing" : holder)
+
+        let isHookInstalled = HealthProbe.isClaudeHookInstalled()
+        line(isHookInstalled, "claude hook", isHookInstalled ? "installed" : "not installed. Run liddy hook install")
 
         let setting = Setting.load()
         print("\nSetting")
@@ -85,39 +87,9 @@ enum Doctor {
         line(nil, "hard battery floor", "\(setting.hardBatteryPercent)%")
         line(nil, "thermal ceiling", setting.thermalCeiling.rawValue)
         line(nil, "idle release", "\(setting.idleReleaseSecond)s")
+        line(nil, "network probe", setting.isNetworkProbeOn ? "on" : "off")
         line(nil, "watch pattern", "\(setting.watchPattern.count) entries")
-    }
 
-    private static func pmsetOutput() -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
-        process.arguments = ["-g"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return "" }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return String(decoding: data, as: UTF8.self)
-    }
-
-    private static func pmsetDisableSleep() -> Bool {
-        for row in pmsetOutput().split(separator: "\n")
-        where row.lowercased().contains("disablesleep") {
-            return row.trimmingCharacters(in: .whitespaces).hasSuffix("1")
-        }
-        return false
-    }
-
-    /// macOS names every process holding a sleep assertion on the `sleep` row. Useful
-    /// for the common confusion of "Liddy released, so why is my Mac still awake?" —
-    /// usually a stray `caffeinate` from three deploys ago.
-    private static func sleepAssertionHolder() -> String {
-        for row in pmsetOutput().split(separator: "\n") where row.contains("sleep prevented by") {
-            guard let open = row.firstIndex(of: "("), let close = row.lastIndex(of: ")") else { continue }
-            return String(row[row.index(after: open)..<close])
-                .replacingOccurrences(of: "sleep prevented by ", with: "")
-        }
-        return ""
+        print("\nRun `liddy health` for the live network and service checks.")
     }
 }

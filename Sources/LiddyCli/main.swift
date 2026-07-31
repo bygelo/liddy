@@ -39,10 +39,14 @@ func flagValue(_ name: String, in argument: [String]) -> String? {
 
 // MARK: - Talking to the app
 
-func send(_ request: AppRequest) -> AppResponse {
+/// `health` is the one request the app answers slowly on purpose: it re-runs the whole
+/// sweep, including the network half, before replying. The default 5s read timeout is
+/// tuned for the instant commands and would give up on a cold DNS cache mid-sweep, so
+/// this one connection gets a window wider than the probe's own worst case.
+func send(_ request: AppRequest, timeoutSecond: Int = 5) -> AppResponse {
     let client = LineSocketClient(path: LiddyPath.appSocket.path)
     do {
-        try client.connect()
+        try client.connect(timeoutSecond: timeoutSecond)
         return try client.roundTrip(request, expecting: AppResponse.self)
     } catch {
         fail(LiddyError.appNotRunning.localizedDescription)
@@ -120,7 +124,7 @@ func runWrapped(_ argument: [String]) -> Never {
         token = issued
     } else {
         FileHandle.standardError.write(Data(
-            "liddy: app not running — holding an unguarded assertion (no battery or thermal floor)\n".utf8))
+            "liddy: app not running, holding an unguarded assertion (no battery or thermal floor)\n".utf8))
     }
 
     // Renew well inside the 60s TTL so a stalled CLI cannot outlive its own claim.
@@ -171,6 +175,8 @@ guard let command = argument.first else {
     liddy \(cliVersion) — keep a Mac awake for work that must finish
 
       liddy status                     what is holding the Mac, and why
+      liddy health                     every check the menu bar draws, as text
+      liddy override [30m] | off       keep going despite a soft safety stop
       liddy start [--timer 3h] [--mode smart|manual]
       liddy stop
       liddy lid on|off [--timer 8h]    closed-lid mode (needs the helper)
@@ -186,6 +192,7 @@ guard let command = argument.first else {
       liddy -- <command>               hold for exactly one command
       liddy setting                    show thresholds
       liddy set --soft-battery 25 --idle-release 5m --charging-only on
+      liddy set --network-probe off    stop probing DNS and agent APIs
       liddy hook install [--project]   hold the Mac only while Claude Code works
       liddy doctor                     check the install, find a stuck disablesleep
     """)
@@ -200,6 +207,16 @@ let ttl = flagValue("--ttl", in: rest).flatMap(parseSecond) ?? 300
 switch command {
 case "status":
     report(send(.status))
+
+case "override":
+    if rest.first == "off" {
+        report(send(.override(second: nil)))
+    } else {
+        report(send(.override(second: second ?? parseSecond(rest.first ?? "30m") ?? 1800)))
+    }
+
+case "health":
+    report(send(.health, timeoutSecond: 15))
 
 case "start":
     report(send(.start(second: second, mode: mode)))
@@ -274,9 +291,12 @@ case "set":
     if let charging = flagValue("--charging-only", in: rest) {
         patch.isChargingOnly = charging == "on" || charging == "true"
     }
+    if let probe = flagValue("--network-probe", in: rest) {
+        patch.isNetworkProbeOn = probe == "on" || probe == "true"
+    }
     guard !patch.isEmpty else {
         fail("usage: liddy set [--soft-battery 25] [--hard-battery 5] [--idle-release 5m] "
-             + "[--thermal-ceiling serious] [--charging-only on|off]")
+             + "[--thermal-ceiling serious] [--charging-only on|off] [--network-probe on|off]")
     }
     report(send(.updateSetting(patch)))
 
@@ -293,5 +313,5 @@ case "help", "--help", "-h":
     out("run `liddy` with no argument for the command list")
 
 default:
-    fail("unknown command '\(command)' — run `liddy` for the command list")
+    fail("unknown command '\(command)'. Run `liddy` for the command list")
 }

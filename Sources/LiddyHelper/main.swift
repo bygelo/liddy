@@ -84,7 +84,7 @@ final class ClamshellGuard {
     /// recovery path for the case where even the helper died.
     func reconcileOnLaunch() {
         guard let state = loadState(), state.isClamshellOn else { return }
-        log("found leftover disablesleep from \(state.setAt) — reverting")
+        log("found leftover disablesleep from \(state.setAt), reverting")
         _ = runPmset(["-a", "disablesleep", "0"])
         saveState(nil)
     }
@@ -127,7 +127,7 @@ final class ClamshellGuard {
         lock.lock()
         defer { lock.unlock() }
         guard isOn else { return }
-        log("client disconnected while disablesleep was on — reverting now")
+        log("client disconnected while disablesleep was on, reverting now")
         _ = setLocked(false)
     }
 
@@ -138,7 +138,7 @@ final class ClamshellGuard {
             self.lock.lock()
             defer { self.lock.unlock() }
             guard self.isOn else { return }
-            log("no heartbeat for \(deadmanSecond)s — reverting disablesleep")
+            log("no heartbeat for \(deadmanSecond)s, reverting disablesleep")
             _ = self.setLocked(false)
         }
         deadman = item
@@ -220,7 +220,7 @@ for signalNumber in [SIGTERM, SIGINT] {
     signal(signalNumber, SIG_IGN)
     let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
     source.setEventHandler {
-        log("shutting down — reverting disablesleep")
+        log("shutting down, reverting disablesleep")
         guardian.set(false)
         server.stop()
         exit(0)

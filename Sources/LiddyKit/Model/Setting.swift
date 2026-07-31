@@ -17,10 +17,21 @@ public struct Setting: Codable, Sendable, Equatable {
     /// Executable name that counts as live work. Matched exactly against the
     /// process's basename (see `ProcessWatcher.matches`), not as a substring.
     public var watchPattern: [String]
+    /// Whether the health panel is allowed to touch the network — DNS, and a HEAD to
+    /// the API of whichever agent is currently holding a lease. Off makes Liddy
+    /// completely silent on the wire; the local half of the panel still works.
+    public var isNetworkProbeOn: Bool
 
     public static let softBatteryRange = 15...50
     public static let hardBatteryRange = 4...8
     public static let maxSessionSecond = 8 * 3600
+
+    /// A ceiling of `.nominal` is not a strict setting, it is a brick: the governor
+    /// asks `thermal.level >= ceiling`, and every possible level is `>= .nominal`, so
+    /// the Mac would be released the instant anything tried to hold it — permanently,
+    /// since the condition can never clear. `.fair` is the lowest ceiling that leaves
+    /// a reachable "everything is fine" state.
+    public static let thermalCeilingChoice: [ThermalLevel] = [.fair, .serious, .critical]
 
     public static let `default` = Setting(
         softBatteryPercent: 20,
@@ -41,7 +52,8 @@ public struct Setting: Codable, Sendable, Equatable {
             "npm", "pnpm", "yarn", "tsc", "esbuild",
             "python", "pytest", "uv", "poetry",
             "docker", "ffmpeg", "rsync", "pandoc",
-        ]
+        ],
+        isNetworkProbeOn: true
     )
 
     public init(
@@ -50,7 +62,8 @@ public struct Setting: Codable, Sendable, Equatable {
         thermalCeiling: ThermalLevel,
         idleReleaseSecond: Int,
         isChargingOnly: Bool,
-        watchPattern: [String]
+        watchPattern: [String],
+        isNetworkProbeOn: Bool = true
     ) {
         self.softBatteryPercent = softBatteryPercent
         self.hardBatteryPercent = hardBatteryPercent
@@ -58,6 +71,32 @@ public struct Setting: Codable, Sendable, Equatable {
         self.idleReleaseSecond = idleReleaseSecond
         self.isChargingOnly = isChargingOnly
         self.watchPattern = watchPattern
+        self.isNetworkProbeOn = isNetworkProbeOn
+    }
+
+    /// Decoded field by field with a fallback per key.
+    ///
+    /// Synthesized `Codable` fails the whole decode when one key is missing, and
+    /// `Setting.load()` swallows that into `.default` — so adding a field would
+    /// silently reset every threshold a user had tuned. Every new field from here on
+    /// must be read with `decodeIfPresent`.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let fallback = Setting.default
+        softBatteryPercent = try container.decodeIfPresent(Int.self, forKey: .softBatteryPercent)
+            ?? fallback.softBatteryPercent
+        hardBatteryPercent = try container.decodeIfPresent(Int.self, forKey: .hardBatteryPercent)
+            ?? fallback.hardBatteryPercent
+        thermalCeiling = try container.decodeIfPresent(ThermalLevel.self, forKey: .thermalCeiling)
+            ?? fallback.thermalCeiling
+        idleReleaseSecond = try container.decodeIfPresent(Int.self, forKey: .idleReleaseSecond)
+            ?? fallback.idleReleaseSecond
+        isChargingOnly = try container.decodeIfPresent(Bool.self, forKey: .isChargingOnly)
+            ?? fallback.isChargingOnly
+        watchPattern = try container.decodeIfPresent([String].self, forKey: .watchPattern)
+            ?? fallback.watchPattern
+        isNetworkProbeOn = try container.decodeIfPresent(Bool.self, forKey: .isNetworkProbeOn)
+            ?? fallback.isNetworkProbeOn
     }
 
     /// Clamp anything a hand-edited config file could get wrong. A soft floor below
@@ -70,6 +109,10 @@ public struct Setting: Codable, Sendable, Equatable {
             copy.softBatteryPercent = Setting.softBatteryRange.lowerBound
         }
         copy.idleReleaseSecond = max(30, idleReleaseSecond)
+        // Clamped here rather than in the picker so the CLI and a hand-edited
+        // setting.json get the same protection — `liddy set --thermal-ceiling nominal`
+        // could otherwise wedge the app into never holding again.
+        if copy.thermalCeiling < .fair { copy.thermalCeiling = .fair }
         return copy
     }
 }

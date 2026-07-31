@@ -28,6 +28,12 @@ public enum AppRequest: Codable, Sendable {
     case notify(title: String, body: String)
     case settingList
     case updateSetting(SettingPatch)
+    /// Waive the releasable safety rules for a bounded window. Never reaches the hard
+    /// battery floor or critical heat behind a shut lid — see `SafetyGovernor`.
+    case override(second: Int?)
+    /// The same sweep the menu bar draws, as text. Shares one implementation with the
+    /// panel so a script and the UI can never disagree about what is broken.
+    case health
 }
 
 /// Only the fields a caller actually passed. Anything nil is left alone, so
@@ -38,24 +44,27 @@ public struct SettingPatch: Codable, Sendable {
     public var idleReleaseSecond: Int?
     public var isChargingOnly: Bool?
     public var thermalCeiling: ThermalLevel?
+    public var isNetworkProbeOn: Bool?
 
     public init(
         softBatteryPercent: Int? = nil,
         hardBatteryPercent: Int? = nil,
         idleReleaseSecond: Int? = nil,
         isChargingOnly: Bool? = nil,
-        thermalCeiling: ThermalLevel? = nil
+        thermalCeiling: ThermalLevel? = nil,
+        isNetworkProbeOn: Bool? = nil
     ) {
         self.softBatteryPercent = softBatteryPercent
         self.hardBatteryPercent = hardBatteryPercent
         self.idleReleaseSecond = idleReleaseSecond
         self.isChargingOnly = isChargingOnly
         self.thermalCeiling = thermalCeiling
+        self.isNetworkProbeOn = isNetworkProbeOn
     }
 
     public var isEmpty: Bool {
         softBatteryPercent == nil && hardBatteryPercent == nil && idleReleaseSecond == nil
-            && isChargingOnly == nil && thermalCeiling == nil
+            && isChargingOnly == nil && thermalCeiling == nil && isNetworkProbeOn == nil
     }
 
     public func applied(to setting: Setting) -> Setting {
@@ -65,6 +74,7 @@ public struct SettingPatch: Codable, Sendable {
         if let idleReleaseSecond { copy.idleReleaseSecond = idleReleaseSecond }
         if let isChargingOnly { copy.isChargingOnly = isChargingOnly }
         if let thermalCeiling { copy.thermalCeiling = thermalCeiling }
+        if let isNetworkProbeOn { copy.isNetworkProbeOn = isNetworkProbeOn }
         return copy.normalized()
     }
 }

@@ -6,8 +6,19 @@ import Foundation
 /// Shape of the loop, once every `tickIntervalSecond`:
 ///   read battery + thermal → ask the governor → apply the verdict → check the timer
 ///   → in smart mode, check whether every lease has been gone long enough to release.
-public final class LiddyRuntime {
+///
+/// `@unchecked Sendable` states the invariant the whole class already runs on and
+/// that `AppModel` already depends on with its `nonisolated` handle: every mutable
+/// field is touched only from `queue`, and the two callbacks are set once at init
+/// before `start()`. The health sweep is the first path that makes the compiler ask
+/// — it awaits an actor and comes back on a different thread — but the rule it has
+/// to obey is the same one every other path here obeys.
+public final class LiddyRuntime: @unchecked Sendable {
     public static let tickIntervalSecond = 5
+    /// Health is checked far less often than state is published: the local half is
+    /// cheap but spawns `pmset`, and the remote half puts packets on the wire. Every
+    /// six ticks is frequent enough to catch a dropped network inside half a minute.
+    public static let healthEveryTick = 6
 
     private let queue = DispatchQueue(label: "com.liddy.runtime")
     private var timer: DispatchSourceTimer?
@@ -17,6 +28,22 @@ public final class LiddyRuntime {
     private let helper: HelperClient
     private let log: ActivityLog
     private var watcher: ProcessWatcher
+    private let history = MetricHistory()
+    private let networkPath = NetworkPathObserver()
+    /// `lazy` only because it needs `networkPath`, which is not available to a stored
+    /// initializer. Touched exclusively from `queue`.
+    private lazy var probe = HealthProbe(path: networkPath)
+    private var health: HealthReport?
+    private var isProbeRunning = false
+    private var isProbeQueued = false
+    /// Callers blocked on a fresh sweep. Drained on `queue` when one lands.
+    private var healthWaiter: [(HealthReport) -> Void] = []
+    private var tickCount = 0
+    private var lastHealthProblem: Set<String> = []
+    /// Checks already notified about, so a sustained outage alerts once rather than
+    /// every 30 seconds until it clears.
+    private var alertedProblem: Set<String> = []
+    private var isSocketBound = false
 
     private var setting: Setting
     private var governor: SafetyGovernor
@@ -30,13 +57,45 @@ public final class LiddyRuntime {
     private var lastLeaseSeenAt: Date?
     private var lastStopReason: StopReason?
     private var lastWarning: String?
+    /// Set when the governor forces a stop, and held until conditions genuinely
+    /// recover. See `beginHoldLocked` for what this exists to prevent.
+    private var safetyLock: StopReason?
+    /// Set when the user turns the hold off by hand.
+    ///
+    /// Without it, "Keep awake" off is meaningless whenever auto-watch is on: the
+    /// watched processes are still running, so the next scan re-acquires within ten
+    /// seconds and the switch flips itself back on while you are looking at it. Off has
+    /// to stay off until *you* say otherwise.
+    private var isUserPaused = false
+    /// "Keep going anyway", and when it lapses.
+    ///
+    /// Always bounded. An override with no expiry is just a disabled safety rule that
+    /// nobody remembers turning off, and the whole argument for this tool is that its
+    /// guardrails are not the optional part.
+    private var overrideUntil: Date?
 
     /// Fired on every state change so the menu bar can redraw.
     public var onChange: ((RuntimeSnapshot) -> Void)?
     /// Fired for user-visible safety events. The app turns these into notifications.
     public var onAlert: ((String) -> Void)?
 
-    public init(setting: Setting = .load(), log: ActivityLog = ActivityLog(), helper: HelperClient = HelperClient()) {
+    /// Injected so the loop can be driven deterministically in a test. The safety
+    /// rules are the whole product, and "release, then let auto-watch re-acquire two
+    /// seconds later" was a bug that no amount of governor-level testing could catch —
+    /// it only exists in the interaction between the governor, the watcher and the
+    /// hold. Testing that requires being able to say what the battery is.
+    private let readBattery: () -> BatteryReading
+    private let readThermal: () -> ThermalReading
+
+    public init(
+        setting: Setting = .load(),
+        log: ActivityLog = ActivityLog(),
+        helper: HelperClient = HelperClient(),
+        battery: @escaping () -> BatteryReading = BatteryReader.read,
+        thermal: @escaping () -> ThermalReading = ThermalReader.read
+    ) {
+        self.readBattery = battery
+        self.readThermal = thermal
         self.setting = setting.normalized()
         self.governor = SafetyGovernor(setting: setting)
         self.log = log
@@ -54,6 +113,7 @@ public final class LiddyRuntime {
     // MARK: - Lifecycle
 
     public func start() {
+        networkPath.start()
         queue.async { [weak self] in
             guard let self, self.timer == nil else { return }
             let source = DispatchSource.makeTimerSource(queue: self.queue)
@@ -67,6 +127,7 @@ public final class LiddyRuntime {
 
     /// Called on quit. Everything this tool turns on must be turned back off here.
     public func shutdown() {
+        networkPath.stop()
         queue.sync {
             timer?.cancel(); timer = nil
             watcher.stop()
@@ -101,6 +162,63 @@ public final class LiddyRuntime {
                 setClamshellLocked(false)
             }
         }
+    }
+
+    /// The app tells the runtime whether the CLI socket actually bound. Losing that
+    /// bind is silent otherwise: every `liddy` command reports "Liddy is not running"
+    /// while the app sits there running perfectly well.
+    public func setSocketBound(_ isBound: Bool, detail: String? = nil) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.isSocketBound = isBound
+            if !isBound {
+                self.log.append(LogEntry(
+                    kind: .note, detail: "CLI socket not bound\(detail.map { ": \($0)" } ?? "")"))
+            }
+            // Re-check straight away rather than leaving the first sweep's answer up
+            // for half a minute — that sweep ran before the socket existed.
+            self.refreshHealthLocked(battery: readBattery(), thermal: readThermal())
+            self.publish()
+        }
+    }
+
+    /// Waive the releasable safety rules for a bounded window and resume holding.
+    ///
+    /// Capped rather than trusted: an override is a considered risk, and the longer it
+    /// runs unattended the less considered it is.
+    public static let maxOverrideSecond = 2 * 3600
+
+    public func setOverride(second: Int) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let window = min(max(60, second), Self.maxOverrideSecond)
+            self.overrideUntil = Date().addingTimeInterval(TimeInterval(window))
+            self.log.append(LogEntry(
+                kind: .safetyWarned,
+                detail: "override for \(window)s"
+                    + (self.safetyLock.map { " despite \($0.summary.lowercased())" } ?? ""),
+                batteryPercent: self.readBattery().percent,
+                thermal: self.readThermal().level))
+            // Clears the lock and the pause, and starts holding again — the override is
+            // pointless if the thing it unblocks does not then run.
+            self.beginHoldLocked(second: nil, mode: .smart, isUserInitiated: true)
+        }
+    }
+
+    public func clearOverride() {
+        queue.async { [weak self] in self?.clearOverrideLocked(detail: "override cancelled") }
+    }
+
+    private func clearOverrideLocked(detail: String) {
+        guard overrideUntil != nil else { return }
+        overrideUntil = nil
+        log.append(LogEntry(kind: .note, detail: detail))
+        publish()
+    }
+
+    private var isOverrideActive: Bool {
+        guard let overrideUntil else { return false }
+        return Date() < overrideUntil
     }
 
     public func setAutoWatch(_ isOn: Bool) {
@@ -175,7 +293,18 @@ public final class LiddyRuntime {
             if isNew {
                 log.append(LogEntry(kind: .leaseAdded, detail: "claim \(label) ttl \(ttlSecond)s"))
             }
-            if !isHeld { beginHoldLocked(second: nil, mode: .smart) }
+            // A claim is somebody asking out loud, so it lifts a manual pause — a script
+            // that says "I am working now" should be honoured, and the alternative is a
+            // pause you set last Tuesday silently costing you an overnight run. It does
+            // *not* lift a safety lock: the battery does not care who asked.
+            isUserPaused = false
+
+            // The lease is recorded either way — the work is real and the panel should
+            // say so — but a claim does not override a safety stop. Otherwise an agent
+            // hook firing every turn walks straight through the battery floor.
+            if !isHeld && safetyLock == nil {
+                beginHoldLocked(second: nil, mode: .smart, isUserInitiated: false)
+            }
             lastLeaseSeenAt = Date()
             publish()
             return lease.token
@@ -211,9 +340,153 @@ public final class LiddyRuntime {
 
     public var snapshot: RuntimeSnapshot { queue.sync { makeSnapshot() } }
 
+    public func recentSample(limit: Int) -> [MetricSample] { queue.sync { history.recent(limit: limit) } }
+
+    // MARK: - Health
+
+    /// Force a sweep now — the menu's Refresh button. Returns immediately; the result
+    /// arrives through `onChange` like every other state update, so the UI redraws
+    /// itself rather than waiting on the network.
+    public func refreshHealth(completion: ((HealthReport) -> Void)? = nil) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            if let completion { self.healthWaiter.append(completion) }
+            self.refreshHealthLocked(battery: readBattery(), thermal: readThermal())
+        }
+    }
+
+    public var currentHealth: HealthReport? { queue.sync { health } }
+
+    /// Blocking variant for `liddy health`.
+    ///
+    /// The CLI is synchronous and one-shot: returning the *previous* sweep means
+    /// `liddy set --network-probe off && liddy health` prints a sweep that still
+    /// probed the network, which reads as the setting having been ignored. A command
+    /// that says "here is the state" has to have looked.
+    ///
+    /// Must not be called from `queue`. The socket handler it serves runs on its own
+    /// connection queue, which is exactly why that handler is not main-actor bound.
+    public func healthNow(timeoutSecond: Int = 10) -> HealthReport? {
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = ReportBox()
+        refreshHealth { report in
+            box.value = report
+            semaphore.signal()
+        }
+        // On timeout, fall back to the last completed sweep rather than printing
+        // nothing — a stale answer labelled with its own timestamp still beats silence.
+        _ = semaphore.wait(timeout: .now() + .seconds(timeoutSecond))
+        return box.value ?? currentHealth
+    }
+
+    private func refreshHealthLocked(battery: BatteryReading, thermal: ThermalReading) {
+        // One sweep at a time — the remote half can take seconds on a bad network, and
+        // stacking sweeps would put a growing pile of HEAD requests on the wire. A
+        // request that arrives mid-sweep is remembered rather than dropped: dropping it
+        // makes the menu's Refresh button do nothing, and leaves the first sweep's
+        // startup-transient answers on screen (the app binds its CLI socket just after
+        // the runtime's first tick, so that sweep always reports it as missing).
+        guard !isProbeRunning else { isProbeQueued = true; return }
+        isProbeRunning = true
+        isProbeQueued = false
+
+        let context = HealthContext(
+            isAwakeHeld: isHeld,
+            isAssertionActive: assertion.isActive,
+            isClamshellActive: isClamshellActive,
+            isSocketBound: isSocketBound,
+            isHelperConnected: helper.isConnected,
+            helperVersion: helper.lastKnownVersion,
+            activeLease: registry.active.map(\.label),
+            battery: battery,
+            thermal: thermal,
+            setting: setting
+        )
+
+        let probe = self.probe
+        Task { [weak self] in
+            let report = await probe.run(context: context)
+            self?.queue.async {
+                guard let self else { return }
+                self.isProbeRunning = false
+                self.health = report
+                let waiter = self.healthWaiter
+                self.healthWaiter.removeAll()
+                waiter.forEach { $0(report) }
+                self.announce(report)
+                self.publish()
+                if self.isProbeQueued {
+                    self.refreshHealthLocked(
+                        battery: self.readBattery(), thermal: self.readThermal())
+                }
+            }
+        }
+    }
+
+    /// Notify once per confirmed failure, and only while something is actually being
+    /// protected. A red row on an idle Mac is information; a red row at 3am during an
+    /// eight-hour run is the reason this panel exists.
+    ///
+    /// A check must be down on **two consecutive sweeps** before it is worth a
+    /// notification — the same two-strikes rule the network probe applies to itself,
+    /// extended to alerting so it also covers the local checks. Without it, every
+    /// launch fired "CLI socket — not bound": the first sweep runs from the runtime's
+    /// own first tick, which happens before the app has bound the socket, so the alarm
+    /// was true for about a second and wrong by the time anyone read it.
+    private func announce(_ report: HealthReport) {
+        let broken = Set(report.check.filter { $0.state == .down }.map(\.id))
+        let confirmed = broken.intersection(lastHealthProblem)
+        defer {
+            lastHealthProblem = broken
+            // Forget anything that recovered, so a future failure can alert again.
+            alertedProblem.formIntersection(broken)
+        }
+        guard isHeld || isClamshellActive else { return }
+
+        for check in report.check
+        where confirmed.contains(check.id) && !alertedProblem.contains(check.id) {
+            alertedProblem.insert(check.id)
+            log.append(LogEntry(kind: .safetyWarned, detail: "health: \(check.label): \(check.detail)"))
+            onAlert?("\(check.label): \(check.detail)")
+        }
+    }
+
     // MARK: - Internals (all queue-confined)
 
-    private func beginHoldLocked(second: Int?, mode: HoldMode) {
+    /// Stop re-arming until the machine recovers.
+    private func engageSafetyLockLocked(_ reason: StopReason) {
+        guard safetyLock == nil else { return }
+        safetyLock = reason
+        log.append(LogEntry(kind: .safetyWarned, detail: "holding back: \(reason.summary)", reason: reason))
+    }
+
+    private func clearSafetyLockLocked() {
+        guard let reason = safetyLock else { return }
+        safetyLock = nil
+        log.append(LogEntry(kind: .note, detail: "recovered from \(reason.summary), holds allowed again"))
+        publish()
+    }
+
+    /// - Parameter isUserInitiated: a hold the user asked for by hand clears the lock
+    ///   and is always attempted — the governor still gets the next word a few seconds
+    ///   later, so an unsafe override stops again immediately and says why, once,
+    ///   instead of looping. An *automatic* hold is refused outright when the governor
+    ///   would only undo it, which also covers the cold-start case the lock alone
+    ///   misses: at 15% on battery with nothing yet held, there is no lock to consult,
+    ///   and the first claim would otherwise acquire an assertion for one tick.
+    private func beginHoldLocked(second: Int?, mode: HoldMode, isUserInitiated: Bool = true) {
+        if isUserInitiated {
+            clearSafetyLockLocked()
+            isUserPaused = false
+        } else {
+            let verdict = governor.evaluate(
+                battery: readBattery(), thermal: readThermal(), isClamshellActive: isClamshellActive)
+            if let reason = verdict.reason {
+                engageSafetyLockLocked(reason)
+                publish()
+                return
+            }
+        }
         self.mode = mode
         if let second {
             expiresAt = Date().addingTimeInterval(TimeInterval(min(second, Setting.maxSessionSecond)))
@@ -234,13 +507,16 @@ public final class LiddyRuntime {
         log.append(LogEntry(
             kind: .holdStarted,
             detail: "mode \(mode.rawValue)" + (second.map { ", timer \($0)s" } ?? ", no timer"),
-            batteryPercent: BatteryReader.read().percent,
-            thermal: ThermalReader.read().level
+            batteryPercent: readBattery().percent,
+            thermal: readThermal().level
         ))
         publish()
     }
 
     private func stopLocked(reason: StopReason) {
+        // Only a hand-made stop pauses. A timer running out or work finishing is the
+        // system doing its job, and the next real workload should hold normally.
+        if reason == .userStopped { isUserPaused = true }
         if isClamshellActive { setClamshellLocked(false) }
         guard isHeld else { return }
 
@@ -256,8 +532,8 @@ public final class LiddyRuntime {
             kind: .holdStopped,
             detail: "\(reason.summary) after \(heldSecond)s",
             reason: reason,
-            batteryPercent: BatteryReader.read().percent,
-            thermal: ThermalReader.read().level
+            batteryPercent: readBattery().percent,
+            thermal: readThermal().level
         ))
         publish()
     }
@@ -288,7 +564,7 @@ public final class LiddyRuntime {
         guard isClamshellActive else { return }
         isClamshellActive = false
         log.append(LogEntry(kind: .helperReverted, detail: "helper connection lost", reason: .heartbeatLost))
-        onAlert?("Lost the Liddy helper — closed-lid protection is off. Open the lid before moving your Mac.")
+        onAlert?("Lost the Liddy helper. Closed-lid protection is off, so open the lid before moving your Mac.")
         publish()
     }
 
@@ -296,23 +572,73 @@ public final class LiddyRuntime {
         registry.replaceProcessLease(label)
         if !label.isEmpty {
             lastLeaseSeenAt = Date()
-            if !isHeld && isAutoWatchOn {
-                beginHoldLocked(second: nil, mode: .smart)
+            // `safetyLock` is the whole reason this condition is not just `!isHeld`.
+            // The watched processes are still running *because* the governor released
+            // the Mac rather than killing anything, so without the lock this line
+            // re-acquires the hold ~10s after every safety stop, the next tick stops it
+            // again, and the floor becomes a 10-second flap that never actually lets the
+            // Mac sleep — while re-notifying the user on every cycle.
+            if !isHeld && isAutoWatchOn && safetyLock == nil && !isUserPaused {
+                beginHoldLocked(second: nil, mode: .smart, isUserInitiated: false)
             }
         }
         publish()
     }
 
     private func tick() {
-        let battery = BatteryReader.read()
-        let thermal = ThermalReader.read()
+        let battery = readBattery()
+        let thermal = readThermal()
+
+        // Sampled and probed before the safety guard below, not after: an idle Mac is
+        // exactly when you want to look at the panel and see that the network and the
+        // helper are fine *before* kicking off an overnight run.
+        history.append(MetricSample(
+            at: Date(),
+            leaseCount: registry.active.count,
+            batteryPercent: battery.percent,
+            thermalRank: thermal.level.rank,
+            isHeld: isHeld
+        ))
+
+        tickCount += 1
+        if tickCount % Self.healthEveryTick == 1 {
+            refreshHealthLocked(battery: battery, thermal: thermal)
+        }
+
+        // Lock maintenance runs *before* the guard below, because a lock is held while
+        // nothing is held — that is the point of it. Checked here, it lifts on its own
+        // as soon as the machine recovers.
+        if overrideUntil != nil && !isOverrideActive {
+            clearOverrideLocked(detail: "override expired, safety rules back on")
+        }
+
+        if safetyLock != nil {
+            let verdict = governor.evaluate(
+                battery: battery, thermal: thermal, isClamshellActive: isClamshellActive)
+            // Cleared only on `.proceed`, never on `.warn`, and that is where the
+            // hysteresis comes from: the governor already warns until the battery is
+            // 10 points clear of the floor, so a release at 25% does not re-arm until
+            // 35% or mains power. Clearing on `.warn` would re-acquire at 26% and drop
+            // again at 25% — the same flap in slower motion.
+            if verdict == .proceed { clearSafetyLockLocked() }
+        }
 
         // Safety runs whenever the lid is held shut, even with no hold of our own —
         // a stale disablesleep is exactly the state that needs a floor watching it.
         guard isHeld || isClamshellActive else { return }
 
-        switch governor.evaluate(battery: battery, thermal: thermal, isClamshellActive: isClamshellActive) {
+        switch governor.evaluate(
+            battery: battery,
+            thermal: thermal,
+            isClamshellActive: isClamshellActive,
+            isOverrideActive: isOverrideActive
+        ) {
         case .forceSleep(let reason):
+            // A forced stop voids the override outright. These are the rules an
+            // override was never allowed to reach, and leaving it armed afterwards
+            // would waive the *next* releasable rule on the way down as well.
+            clearOverrideLocked(detail: "override void, \(reason.summary.lowercased())")
+            engageSafetyLockLocked(reason)
             log.append(LogEntry(
                 kind: .safetyWarned,
                 detail: "forcing sleep: \(reason.summary)",
@@ -326,6 +652,7 @@ public final class LiddyRuntime {
             return
 
         case .release(let reason):
+            engageSafetyLockLocked(reason)
             onAlert?("Releasing your Mac: \(reason.summary)")
             stopLocked(reason: reason)
             return
@@ -363,6 +690,14 @@ public final class LiddyRuntime {
         publish()
     }
 
+    // MARK: - Test seams
+
+    /// Run one loop iteration synchronously, instead of waiting out the 5s timer.
+    func tickForTest() { queue.sync { tick() } }
+
+    /// Deliver a process scan as the watcher would, without a real `ps`.
+    func applyScanForTest(_ label: [String]) { queue.sync { applyScan(label) } }
+
     private func makeSnapshot() -> RuntimeSnapshot {
         RuntimeSnapshot(
             isAwakeHeld: isHeld,
@@ -372,9 +707,14 @@ public final class LiddyRuntime {
             startedAt: startedAt,
             expiresAt: expiresAt,
             activeLease: registry.active.map(\.display),
-            battery: BatteryReader.read(),
-            thermal: ThermalReader.read(),
-            lastStopReason: lastStopReason
+            battery: readBattery(),
+            thermal: readThermal(),
+            lastStopReason: lastStopReason,
+            health: health,
+            blockedBy: safetyLock,
+            isAutoWatchOn: isAutoWatchOn,
+            isUserPaused: isUserPaused,
+            overrideUntil: isOverrideActive ? overrideUntil : nil
         )
     }
 
@@ -382,6 +722,12 @@ public final class LiddyRuntime {
         let snapshot = makeSnapshot()
         DispatchQueue.main.async { [onChange] in onChange?(snapshot) }
     }
+}
+
+/// Carries a sweep across the semaphore in `healthNow`. A plain captured `var` cannot
+/// be mutated from an escaping closure under strict-concurrency checking.
+private final class ReportBox: @unchecked Sendable {
+    var value: HealthReport?
 }
 
 public enum LiddyError: LocalizedError {

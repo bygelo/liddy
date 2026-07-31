@@ -24,6 +24,16 @@ public final class HelperClient {
         FileManager.default.fileExists(atPath: LiddyPath.helperSocketPath)
     }
 
+    /// Read by the health panel. Deliberately a property on the *existing* connection
+    /// rather than a fresh probe: the helper reverts `disablesleep` when any connection
+    /// to it closes, so a panel that dialled the helper on a timer would end the very
+    /// closed-lid session it was reporting on.
+    public var isConnected: Bool { client.isConnected }
+
+    /// Captured from the one status round trip made on the live connection, so the
+    /// panel can name the helper version without opening anything.
+    public private(set) var lastKnownVersion: String?
+
     public func connect() throws {
         try client.connect()
     }
@@ -46,7 +56,14 @@ public final class HelperClient {
         if case .failed(let message) = response {
             throw SocketError.cannotConnect(message)
         }
-        if isOn { startHeartbeat() } else { stopHeartbeat() }
+        if isOn {
+            startHeartbeat()
+            // Reuses the connection just opened — no second dial, so the deadman
+            // switch never sees a close.
+            lastKnownVersion = try? status().version
+        } else {
+            stopHeartbeat()
+        }
     }
 
     public func sleepNow(reason: String) throws {

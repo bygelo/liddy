@@ -150,7 +150,15 @@ public final class LineSocketServer {
 
     public func stop() {
         isStopped = true
-        if listenFd >= 0 { close(listenFd) }
+        // Reset the descriptor, don't just close it. `stop()` runs twice on quit — the
+        // menu's Quit button shuts the model down and then `applicationWillTerminate`
+        // does it again — and without this the second call closes a number the kernel
+        // may already have handed to something else. Harmless while the process is
+        // exiting; a genuine close-someone-else's-socket bug anywhere it is not.
+        if listenFd >= 0 {
+            close(listenFd)
+            listenFd = -1
+        }
         unlink(path)
     }
 }

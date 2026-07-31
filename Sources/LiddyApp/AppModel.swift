@@ -8,7 +8,21 @@ import LiddyKit
 final class AppModel: ObservableObject {
     @Published private(set) var snapshot = RuntimeSnapshot()
     @Published private(set) var recentEntry: [LogEntry] = []
+    @Published private(set) var recentSample: [MetricSample] = []
+    @Published private(set) var setting: Setting = .default
     @Published var alert: String?
+
+    /// Which sections are open. These live here rather than as `@State` in the view
+    /// because the window has to resize itself when one opens, and the panel
+    /// controller can only see state it can subscribe to. Keeping them here also means
+    /// a section you opened is still open the next time you click the icon.
+    @Published var isAgentExpanded = false
+    @Published var isHealthExpanded = false
+    @Published var isActivityExpanded = false
+    @Published var isSettingExpanded = false
+
+    /// How many samples the sparkline draws. Also the width of the strip in bars.
+    static let sparklineSampleCount = 48
 
     /// `nonisolated` on purpose: the runtime is internally queue-confined and safe to
     /// call from any thread, and the CLI socket handler must reach it without hopping
@@ -19,8 +33,14 @@ final class AppModel: ObservableObject {
     init() {
         runtime.onChange = { [weak self] snapshot in
             Task { @MainActor in
-                self?.snapshot = snapshot
-                self?.recentEntry = self?.runtime.recentLog(limit: 12) ?? []
+                guard let self else { return }
+                self.snapshot = snapshot
+                self.recentEntry = self.runtime.recentLog(limit: 12)
+                self.recentSample = self.runtime.recentSample(limit: Self.sparklineSampleCount)
+                // The panel draws thresholds, not just readings — a battery ring that
+                // turns amber at the soft floor has to know where the floor moved to.
+                self.setting = self.runtime.currentSetting
+                self.refreshHelperReadiness()
             }
         }
         runtime.onAlert = { [weak self] message in
@@ -37,6 +57,9 @@ final class AppModel: ObservableObject {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         snapshot = runtime.snapshot
         recentEntry = runtime.recentLog(limit: 12)
+        recentSample = runtime.recentSample(limit: Self.sparklineSampleCount)
+        setting = runtime.currentSetting
+        runtime.refreshHealth()
     }
 
     /// Wired to app termination. Anything turned on must come back off here — the
@@ -68,6 +91,103 @@ final class AppModel: ObservableObject {
         runtime.beginHold(second: second, mode: .smart)
     }
 
+    /// The one control the panel leads with. Collapses what used to be two switches,
+    /// and makes the impossible fourth combination unrepresentable rather than merely
+    /// refused after the fact.
+    func select(mode: ModeSelector.Mode) {
+        alert = nil
+        switch mode {
+        case .sleep:
+            if snapshot.isClamshellActive { toggleClamshell(second: nil) }
+            if snapshot.isAwakeHeld { runtime.endHold(reason: .userStopped) }
+
+        case .awake:
+            // Stepping down from lid-shut has to drop the privileged toggle first, or
+            // the Mac keeps ignoring the lid while the panel says it is only awake.
+            if snapshot.isClamshellActive { toggleClamshell(second: nil) }
+            runtime.beginHold(second: nil, mode: .smart)
+
+        case .lid:
+            // Picking a capability you do not have yet should install it, not scold
+            // you. The password prompt is a better answer than an error banner.
+            guard HelperInstaller.isInstalled else {
+                installHelper()
+                guard isHelperReady else { return }
+                toggleClamshell(second: 8 * 3600)
+                return
+            }
+            if !snapshot.isClamshellActive { toggleClamshell(second: 8 * 3600) }
+        }
+    }
+
+    func override(second: Int) {
+        alert = nil
+        runtime.setOverride(second: second)
+    }
+
+    func cancelOverride() {
+        runtime.clearOverride()
+        runtime.endHold(reason: .userStopped)
+    }
+
+    func refreshHealth() {
+        alert = nil
+        // Refresh means "look again at everything", which includes which agent apps
+        // are installed — otherwise a freshly installed Cursor keeps its placeholder
+        // glyph until the app restarts.
+        AppIconResolver.forget()
+        runtime.refreshHealth()
+    }
+
+    func setNetworkProbe(_ isOn: Bool) {
+        _ = runtime.updateSetting(SettingPatch(isNetworkProbeOn: isOn))
+        runtime.refreshHealth()
+    }
+
+    func setAutoWatch(_ isOn: Bool) {
+        runtime.setAutoWatch(isOn)
+    }
+
+    // MARK: - Helper
+
+    /// Whether closed-lid mode can be offered at all.
+    @Published private(set) var isHelperReady = HelperInstaller.isInstalled
+    @Published private(set) var isInstallingHelper = false
+
+    func installHelper() {
+        guard !isInstallingHelper else { return }
+        isInstallingHelper = true
+        alert = nil
+        do {
+            try HelperInstaller.install()
+            isHelperReady = true
+            // The daemon is new, so the health panel's helper row is stale.
+            runtime.refreshHealth()
+        } catch HelperInstaller.Failure.cancelled {
+            // Dismissing the password prompt is a decision, not an error to report back.
+        } catch {
+            alert = error.localizedDescription
+        }
+        isInstallingHelper = false
+    }
+
+    /// Re-checked on every runtime publish so the row updates if the helper is
+    /// installed or removed from outside the app — `Script/install-helper.sh` in a
+    /// Terminal, or `uninstall-helper.sh`.
+    private func refreshHelperReadiness() {
+        let isReady = HelperInstaller.isInstalled
+        if isReady != isHelperReady { isHelperReady = isReady }
+    }
+
+    /// Applied to the live governor, not just saved — see `LiddyRuntime.updateSetting`.
+    /// The health sweep re-runs because several checks are read against these
+    /// thresholds, so a floor you just moved should recolour the panel now rather than
+    /// at the next 30-second sweep.
+    func updateSetting(_ patch: SettingPatch) {
+        setting = runtime.updateSetting(patch)
+        runtime.refreshHealth()
+    }
+
     // MARK: - CLI server
 
     private func startServer() {
@@ -78,8 +198,17 @@ final class AppModel: ObservableObject {
             let response = self.handleSync(request)
             return try? Wire.encoder.encode(response)
         }
-        try? server.start(mode: 0o600)
-        self.server = server
+        do {
+            try server.start(mode: 0o600)
+            self.server = server
+            runtime.setSocketBound(true)
+        } catch {
+            // Swallowing this is what made the failure invisible: the app runs fine,
+            // the menu looks normal, and every `liddy` command reports "Liddy is not
+            // running" with no way to tell that apart from the app being closed.
+            runtime.setSocketBound(false, detail: error.localizedDescription)
+            alert = "CLI socket unavailable: \(error.localizedDescription)"
+        }
     }
 
     /// Runs on a socket connection queue. The runtime is internally queue-confined,
@@ -135,6 +264,7 @@ final class AppModel: ObservableObject {
                 "thermal-ceiling \(setting.thermalCeiling.rawValue)",
                 "idle-release   \(setting.idleReleaseSecond)s",
                 "charging-only  \(setting.isChargingOnly)",
+                "network-probe  \(setting.isNetworkProbeOn)",
             ])
 
         case .updateSetting(let patch):
@@ -143,12 +273,13 @@ final class AppModel: ObservableObject {
                        + "hard-battery \(setting.hardBatteryPercent)%, "
                        + "thermal-ceiling \(setting.thermalCeiling.rawValue), "
                        + "idle-release \(setting.idleReleaseSecond)s, "
-                       + "charging-only \(setting.isChargingOnly)")
+                       + "charging-only \(setting.isChargingOnly), "
+                       + "network-probe \(setting.isNetworkProbeOn)")
 
         case .renew(let token, let ttlSecond):
             return runtime.renew(token: token, ttlSecond: ttlSecond)
                 ? .ok("renewed")
-                : .failed("unknown or expired token — claim again")
+                : .failed("unknown or expired token, claim again")
 
         case .release(let token):
             return runtime.release(token: token) ? .ok("released") : .failed("unknown token")
@@ -160,8 +291,33 @@ final class AppModel: ObservableObject {
         case .recentLog(let limit):
             return .log(runtime.recentLog(limit: limit))
 
+        case .override(let second):
+            guard let second else {
+                runtime.clearOverride()
+                return .ok("override cancelled")
+            }
+            runtime.setOverride(second: second)
+            return .ok("keeping going for \(min(second, LiddyRuntime.maxOverrideSecond))s. "
+                       + "hard battery floor and critical heat still apply")
+
+        case .health:
+            // Blocks this connection's queue until the sweep lands — see `healthNow`.
+            guard let report = runtime.healthNow() else {
+                return .text(["checking… run again in a moment"])
+            }
+            var line: [String] = []
+            for group in HealthGroup.allCases {
+                let check = report.check(in: group)
+                guard !check.isEmpty else { continue }
+                line.append("\(group.display.uppercased())  [\(report.state(of: group).display)]")
+                line += check.map { "  \($0.line)" }
+            }
+            line.append("")
+            line.append("overall: \(report.overall.display) · checked \(report.at.formatted(date: .omitted, time: .standard))")
+            return .text(line)
+
         case .notify(let title, let body):
-            notify("\(title) — \(body)")
+            notify("\(title): \(body)")
             return .ok("sent")
         }
     }

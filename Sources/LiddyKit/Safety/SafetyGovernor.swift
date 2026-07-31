@@ -36,7 +36,32 @@ public struct SafetyGovernor: Sendable {
     }
 
     /// Evaluated most-severe first — a hard floor must win over every softer rule.
+    ///
+    /// - Parameter isOverrideActive: the user has said "keep going anyway".
+    ///
+    ///   The split this turns on is the one already encoded in the return type, which
+    ///   is why the override needs no list of exceptions to maintain. `.release` rules
+    ///   are *courtesy*: sleep while there is still headroom, back off when warm, stay
+    ///   off battery if asked. Those are the user's call to waive — it is their Mac and
+    ///   their unfinished job.
+    ///
+    ///   `.forceSleep` rules are not courtesy. The hard battery floor exists so a run
+    ///   ends in a resumable sleep instead of a hard shutdown, and critical heat behind
+    ///   a shut lid has no airflow to recover through. Waiving those does not express a
+    ///   preference, it loses work or cooks hardware — so an override cannot reach them
+    ///   at any setting.
     public func evaluate(
+        battery: BatteryReading,
+        thermal: ThermalReading,
+        isClamshellActive: Bool,
+        isOverrideActive: Bool = false
+    ) -> SafetyVerdict {
+        let verdict = rule(battery: battery, thermal: thermal, isClamshellActive: isClamshellActive)
+        guard isOverrideActive, case .release(let reason) = verdict else { return verdict }
+        return .warn("Overriding: \(reason.summary)")
+    }
+
+    private func rule(
         battery: BatteryReading,
         thermal: ThermalReading,
         isClamshellActive: Bool
@@ -71,11 +96,11 @@ public struct SafetyGovernor: Sendable {
 
         // Warnings — the run continues, but the menu bar should say something.
         if thermal.level >= .serious {
-            return .warn("Thermal pressure \(thermal.level.display) — check airflow")
+            return .warn("Thermal pressure \(thermal.level.display). Check airflow")
         }
         if let percent = battery.percent, !battery.isOnMain,
            percent < setting.softBatteryPercent + 10 {
-            return .warn("Battery \(percent)% — will sleep at \(setting.softBatteryPercent)%")
+            return .warn("Battery \(percent)%, will sleep at \(setting.softBatteryPercent)%")
         }
         return .proceed
     }
