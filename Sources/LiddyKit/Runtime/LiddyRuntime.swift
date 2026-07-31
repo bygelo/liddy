@@ -140,20 +140,50 @@ public final class LiddyRuntime {
 
     public var currentPattern: [String] { queue.sync { setting.watchPattern } }
 
+    public var currentSetting: Setting { queue.sync { setting } }
+
+    /// Applied to the live governor immediately, not just on next launch — a floor
+    /// you just raised should protect the run you are in the middle of.
+    public func updateSetting(_ patch: SettingPatch) -> Setting {
+        queue.sync {
+            setting = patch.applied(to: setting)
+            governor = SafetyGovernor(setting: setting)
+            try? setting.save()
+            log.append(LogEntry(kind: .note, detail: "setting updated"))
+            publish()
+            return setting
+        }
+    }
+
     // MARK: - Lease (the agent-awareness path)
 
     /// An explicit declaration of live work. Preferred over process matching: the
     /// agent itself knows whether it is mid-task, and a TTL means a crashed claimer
     /// stops holding the Mac on its own without anything having to notice it died.
-    public func claim(label: String, ttlSecond: Int) -> String {
+    public func claim(label: String, ttlSecond: Int, key: String? = nil) -> String {
         queue.sync {
-            let lease = registry.claim(label: label, ttlSecond: ttlSecond)
-            log.append(LogEntry(kind: .leaseAdded, detail: "claim \(label) ttl \(ttlSecond)s"))
+            let isNew: Bool
+            if let key {
+                let token = LeaseRegistry.token(forKey: key)
+                isNew = !registry.active.contains { $0.token == token }
+            } else {
+                isNew = true
+            }
+            let lease = registry.claim(label: label, ttlSecond: ttlSecond, key: key)
+            // A per-turn hook re-claims constantly; logging every renewal would bury
+            // the entries that explain why a run stopped.
+            if isNew {
+                log.append(LogEntry(kind: .leaseAdded, detail: "claim \(label) ttl \(ttlSecond)s"))
+            }
             if !isHeld { beginHoldLocked(second: nil, mode: .smart) }
             lastLeaseSeenAt = Date()
             publish()
             return lease.token
         }
+    }
+
+    public func release(key: String) -> Bool {
+        release(token: LeaseRegistry.token(forKey: key))
     }
 
     public func renew(token: String, ttlSecond: Int) -> Bool {

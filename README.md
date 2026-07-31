@@ -71,6 +71,34 @@ Two things the matcher gets right that a naive one does not:
 
 `liddy -- <command>` also registers a renewing lease when the app is running, so a wrapped command is covered by the battery and thermal floors. Only when the app genuinely is not running does it fall back to a bare assertion — and it tells you so on stderr.
 
+### Claude Code hooks
+
+```bash
+liddy hook install              # ~/.claude/settings.json
+liddy hook install --project    # ./.claude/settings.json
+liddy hook print                # just show the JSON
+```
+
+Claude Code then holds your Mac awake **exactly while a turn is running**:
+
+| Event | Action |
+|---|---|
+| `UserPromptSubmit` | claim, keyed by `session_id` |
+| `Stop` | release |
+| `SessionEnd` | release (backstop) |
+
+Hooking `SessionStart`/`SessionEnd` instead is the obvious choice and is wrong: a session left open in a terminal overnight would hold the Mac awake with nothing running — the same failure as watching a server process.
+
+Claims are keyed and idempotent, so firing on every turn renews one lease instead of leaking one per turn, and each carries a 1h TTL so a session that dies mid-turn releases itself. Install is idempotent, and every hook path exits 0 — including "Liddy isn't running" and malformed stdin. A keep-awake tool being absent is not a reason for your prompt to fail.
+
+### Diagnose
+
+```bash
+liddy doctor
+```
+
+Reports CLI/app/helper state, live battery and thermal, your thresholds, everything currently holding a sleep assertion (a stray `caffeinate` from three deploys ago is the usual culprit), and — loudly — a stuck `disablesleep 1` with no helper watching it, plus the command to clear it.
+
 ## Install
 
 ```bash
@@ -83,6 +111,14 @@ Keep-awake, timers, charging-only, both battery floors and thermal watch all wor
 
 Uninstall: `./Script/uninstall-helper.sh` — unloads the daemon and asserts `disablesleep 0` regardless of how it exited.
 
+### Verify the safety claim before trusting it
+
+```bash
+./Script/verify-deadman.sh
+```
+
+Enables closed-lid mode, confirms `disablesleep` is `1`, `kill -9`s the app, and watches for the setting to return to `0`. **If this does not pass, closed-lid mode is not safe to use overnight** — that revert is the entire difference between Liddy and a raw `pmset -a disablesleep 1`.
+
 ## Commands
 
 ```
@@ -92,10 +128,14 @@ liddy stop
 liddy lid on|off [--timer 8h]    closed-lid mode (needs the helper)
 liddy autowatch on|off|toggle
 liddy watch <pattern> | unwatch <pattern> | pattern
-liddy claim <label> [--ttl 300]  declare live work, prints a token
-liddy renew <token> | release <token> | lease
+liddy claim <label> [--ttl 300] [--key K]   declare live work
+liddy renew <token> | release <token> | release --key K | lease
 liddy log [-n 20]
 liddy -- <command>               hold for exactly one command, passes its exit code
+liddy setting                    show thresholds
+liddy set --soft-battery 25 --idle-release 5m --charging-only on
+liddy hook install [--project]   hold the Mac only while Claude Code works
+liddy doctor                     check the install, find a stuck disablesleep
 ```
 
 `smart` (default) releases ~10 min after the last lease disappears. `manual` holds for the full window.

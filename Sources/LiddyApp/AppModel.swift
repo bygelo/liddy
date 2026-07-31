@@ -121,8 +121,29 @@ final class AppModel: ObservableObject {
         case .pattern:
             return .text(runtime.currentPattern)
 
-        case .claim(let label, let ttlSecond):
-            return .token(runtime.claim(label: label, ttlSecond: ttlSecond))
+        case .claim(let label, let ttlSecond, let key):
+            return .token(runtime.claim(label: label, ttlSecond: ttlSecond, key: key))
+
+        case .releaseKey(let key):
+            return runtime.release(key: key) ? .ok("released") : .failed("no lease for key")
+
+        case .settingList:
+            let setting = runtime.currentSetting
+            return .text([
+                "soft-battery   \(setting.softBatteryPercent)%",
+                "hard-battery   \(setting.hardBatteryPercent)%",
+                "thermal-ceiling \(setting.thermalCeiling.rawValue)",
+                "idle-release   \(setting.idleReleaseSecond)s",
+                "charging-only  \(setting.isChargingOnly)",
+            ])
+
+        case .updateSetting(let patch):
+            let setting = runtime.updateSetting(patch)
+            return .ok("soft-battery \(setting.softBatteryPercent)%, "
+                       + "hard-battery \(setting.hardBatteryPercent)%, "
+                       + "thermal-ceiling \(setting.thermalCeiling.rawValue), "
+                       + "idle-release \(setting.idleReleaseSecond)s, "
+                       + "charging-only \(setting.isChargingOnly)")
 
         case .renew(let token, let ttlSecond):
             return runtime.renew(token: token, ttlSecond: ttlSecond)

@@ -78,18 +78,40 @@ public final class LeaseRegistry {
         }
     }
 
+    /// - Parameter key: when given, the lease is keyed rather than random, so
+    ///   claiming again with the same key renews the existing lease instead of
+    ///   stacking a second one. A per-turn hook depends on this: without it, every
+    ///   turn would leak a lease that outlives the work it represented.
     @discardableResult
-    public func claim(label: String, ttlSecond: Int, source: WorkLease.Source = .claim) -> WorkLease {
+    public func claim(
+        label: String,
+        ttlSecond: Int,
+        source: WorkLease.Source = .claim,
+        key: String? = nil
+    ) -> WorkLease {
         lock.lock()
         defer { lock.unlock() }
-        let lease = WorkLease(
-            token: "\(source.rawValue):\(UUID().uuidString)",
-            label: label,
-            source: source,
-            expiresAt: Date().addingTimeInterval(TimeInterval(max(1, ttlSecond)))
-        )
-        store[lease.token] = lease
+
+        let token = key.map { Self.token(forKey: $0) } ?? "\(source.rawValue):\(UUID().uuidString)"
+        let expiresAt = Date().addingTimeInterval(TimeInterval(max(1, ttlSecond)))
+
+        if var existing = store[token] {
+            existing.expiresAt = expiresAt
+            existing.label = label
+            store[token] = existing
+            return existing
+        }
+
+        let lease = WorkLease(token: token, label: label, source: source, expiresAt: expiresAt)
+        store[token] = lease
         return lease
+    }
+
+    public static func token(forKey key: String) -> String { "claim:key:\(key)" }
+
+    @discardableResult
+    public func release(key: String) -> Bool {
+        release(token: Self.token(forKey: key))
     }
 
     /// Push a claimed lease's expiry out. Returns false if the token is unknown or

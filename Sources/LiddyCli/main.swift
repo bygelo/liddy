@@ -114,7 +114,7 @@ func runWrapped(_ argument: [String]) -> Never {
     let client = LineSocketClient(path: LiddyPath.appSocket.path)
     if (try? client.connect()) != nil,
        let response = try? client.roundTrip(
-           AppRequest.claim(label: command, ttlSecond: 60),
+           AppRequest.claim(label: command, ttlSecond: 60, key: nil),
            expecting: AppResponse.self),
        case .token(let issued) = response {
         token = issued
@@ -178,12 +178,16 @@ guard let command = argument.first else {
       liddy watch <pattern>            add a process pattern
       liddy unwatch <pattern>          remove one
       liddy pattern                    list them
-      liddy claim <label> [--ttl 300]  declare live work, prints a token
+      liddy claim <label> [--ttl 300] [--key K]   declare live work
       liddy renew <token> [--ttl 300]
-      liddy release <token>
+      liddy release <token> | --key K
       liddy lease                      what is currently claimed
       liddy log [-n 20]                why sessions started and stopped
       liddy -- <command>               hold for exactly one command
+      liddy setting                    show thresholds
+      liddy set --soft-battery 25 --idle-release 5m --charging-only on
+      liddy hook install [--project]   hold the Mac only while Claude Code works
+      liddy doctor                     check the install, find a stuck disablesleep
     """)
     exit(0)
 }
@@ -233,16 +237,23 @@ case "pattern":
     report(send(.pattern))
 
 case "claim":
-    guard let label = rest.first, !label.hasPrefix("--") else { fail("usage: liddy claim <label> [--ttl 300]") }
-    report(send(.claim(label: label, ttlSecond: ttl)))
+    guard let label = rest.first, !label.hasPrefix("--") else {
+        fail("usage: liddy claim <label> [--ttl 300] [--key K]")
+    }
+    report(send(.claim(label: label, ttlSecond: ttl, key: flagValue("--key", in: rest))))
 
 case "renew":
     guard let token = rest.first else { fail("usage: liddy renew <token> [--ttl 300]") }
     report(send(.renew(token: token, ttlSecond: ttl)))
 
 case "release":
-    guard let token = rest.first else { fail("usage: liddy release <token>") }
-    report(send(.release(token: token)))
+    if let key = flagValue("--key", in: rest) {
+        report(send(.releaseKey(key: key)))
+    } else if let token = rest.first, !token.hasPrefix("--") {
+        report(send(.release(token: token)))
+    } else {
+        fail("usage: liddy release <token> | --key K")
+    }
 
 case "lease":
     report(send(.lease))
@@ -250,6 +261,30 @@ case "lease":
 case "log":
     let limit = flagValue("-n", in: rest).flatMap(Int.init) ?? 20
     report(send(.recentLog(limit: limit)))
+
+case "setting":
+    report(send(.settingList))
+
+case "set":
+    var patch = SettingPatch()
+    patch.softBatteryPercent = flagValue("--soft-battery", in: rest).flatMap(Int.init)
+    patch.hardBatteryPercent = flagValue("--hard-battery", in: rest).flatMap(Int.init)
+    patch.idleReleaseSecond = flagValue("--idle-release", in: rest).flatMap(parseSecond)
+    patch.thermalCeiling = flagValue("--thermal-ceiling", in: rest).flatMap(ThermalLevel.init(rawValue:))
+    if let charging = flagValue("--charging-only", in: rest) {
+        patch.isChargingOnly = charging == "on" || charging == "true"
+    }
+    guard !patch.isEmpty else {
+        fail("usage: liddy set [--soft-battery 25] [--hard-battery 5] [--idle-release 5m] "
+             + "[--thermal-ceiling serious] [--charging-only on|off]")
+    }
+    report(send(.updateSetting(patch)))
+
+case "hook":
+    Hook.run(rest)
+
+case "doctor":
+    Doctor.run()
 
 case "--version", "-v", "version":
     out(cliVersion)

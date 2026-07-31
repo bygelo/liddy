@@ -15,12 +15,58 @@ public enum AppRequest: Codable, Sendable {
     case pattern
     /// Explicit work lease — the agent-awareness path. An agent declares it is busy
     /// instead of being inferred from a process name at 0% CPU.
-    case claim(label: String, ttlSecond: Int)
+    ///
+    /// `key` makes a claim idempotent: claiming twice with the same key renews the
+    /// one lease rather than stacking two. That is what lets a hook fire on every
+    /// turn without leaking a lease per turn.
+    case claim(label: String, ttlSecond: Int, key: String?)
     case renew(token: String, ttlSecond: Int)
     case release(token: String)
+    case releaseKey(key: String)
     case lease
     case recentLog(limit: Int)
     case notify(title: String, body: String)
+    case settingList
+    case updateSetting(SettingPatch)
+}
+
+/// Only the fields a caller actually passed. Anything nil is left alone, so
+/// `liddy set --soft-battery 25` cannot silently reset every other threshold.
+public struct SettingPatch: Codable, Sendable {
+    public var softBatteryPercent: Int?
+    public var hardBatteryPercent: Int?
+    public var idleReleaseSecond: Int?
+    public var isChargingOnly: Bool?
+    public var thermalCeiling: ThermalLevel?
+
+    public init(
+        softBatteryPercent: Int? = nil,
+        hardBatteryPercent: Int? = nil,
+        idleReleaseSecond: Int? = nil,
+        isChargingOnly: Bool? = nil,
+        thermalCeiling: ThermalLevel? = nil
+    ) {
+        self.softBatteryPercent = softBatteryPercent
+        self.hardBatteryPercent = hardBatteryPercent
+        self.idleReleaseSecond = idleReleaseSecond
+        self.isChargingOnly = isChargingOnly
+        self.thermalCeiling = thermalCeiling
+    }
+
+    public var isEmpty: Bool {
+        softBatteryPercent == nil && hardBatteryPercent == nil && idleReleaseSecond == nil
+            && isChargingOnly == nil && thermalCeiling == nil
+    }
+
+    public func applied(to setting: Setting) -> Setting {
+        var copy = setting
+        if let softBatteryPercent { copy.softBatteryPercent = softBatteryPercent }
+        if let hardBatteryPercent { copy.hardBatteryPercent = hardBatteryPercent }
+        if let idleReleaseSecond { copy.idleReleaseSecond = idleReleaseSecond }
+        if let isChargingOnly { copy.isChargingOnly = isChargingOnly }
+        if let thermalCeiling { copy.thermalCeiling = thermalCeiling }
+        return copy.normalized()
+    }
 }
 
 public enum AppResponse: Codable, Sendable {
