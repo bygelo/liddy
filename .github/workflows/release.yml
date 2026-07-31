@@ -1,0 +1,153 @@
+name: Release
+
+# Tag a version to cut a release:
+#   git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, without the leading v (e.g. 0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # arm64 image with Xcode 16. Liddy is Apple silicon only — it reads IOKit
+    # power state and drives pmset, and there is no Intel build to test on.
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "building $version"
+
+      - name: Report toolchain
+        run: swift --version
+
+      - name: Test
+        run: swift test
+
+      # build-app.sh writes Info.plist itself, so the version is passed in
+      # rather than patched into the product afterwards.
+      - name: Build bundle
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD: ${{ github.run_number }}
+        run: ./Script/build-app.sh release
+
+      # No Developer ID is available here, so the identity lookup in
+      # build-app.sh finds nothing and falls back to ad-hoc. That is fine for
+      # distribution but it is why the notes tell users to clear quarantine.
+      - name: Verify the bundle is complete
+        run: |
+          app=dist/Liddy.app
+          test -x "$app/Contents/MacOS/Liddy"            || { echo "::error::app binary missing"; exit 1; }
+          test -x "$app/Contents/Helpers/liddy"          || { echo "::error::CLI missing"; exit 1; }
+          test -x "$app/Contents/Helpers/liddy-helper"   || { echo "::error::root helper missing"; exit 1; }
+          test -f "$app/Contents/Resources/Liddy.icns"   || { echo "::error::icon missing"; exit 1; }
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" "$app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app/Contents/Info.plist"
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+      # A headless smoke test. `doctor` touches IOKit, pmset and the socket path
+      # without opening any UI; on a runner with no app running it reports a
+      # not-installed state — the point is that the binary loads and exits
+      # cleanly, not what it concludes.
+      - name: Smoke test
+        run: |
+          dist/Liddy.app/Contents/Helpers/liddy --version
+          dist/Liddy.app/Contents/Helpers/liddy doctor || true
+
+      # ditto, not zip: an .app is a bundle whose symlinks and extended
+      # attributes a plain zip will quietly flatten.
+      - name: Package
+        id: package
+        run: |
+          name="Liddy-${{ steps.version.outputs.version }}.zip"
+          ditto -c -k --sequesterRsrc --keepParent dist/Liddy.app "$name"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "sha=$(shasum -a 256 "$name" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Write release notes
+        run: |
+          cat > NOTE.md <<'EOF'
+          Keep a Mac awake — lid closed — while a long AI or dev job finishes,
+          then let it sleep.
+
+          ## Install
+
+          1. Unzip and drag **Liddy.app** to `/Applications`
+          2. Clear the quarantine flag, then open it:
+
+          ```sh
+          xattr -dr com.apple.quarantine /Applications/Liddy.app
+          open /Applications/Liddy.app
+          ```
+
+          Step 2 is required. This build is **ad-hoc signed, not notarized** —
+          shipping a notarized build needs a paid Apple Developer account.
+          Without clearing quarantine, Gatekeeper refuses to launch it.
+
+          Because the signature is ad-hoc, its identity changes on every
+          release, so macOS treats each update as a new app.
+
+          3. Put the `liddy` command on your PATH (it ships inside the bundle):
+
+          ```sh
+          mkdir -p ~/.local/bin
+          ln -sf /Applications/Liddy.app/Contents/Helpers/liddy ~/.local/bin/liddy
+          ```
+
+          ## Closing the lid
+
+          Keep-awake, timers, both battery floors and thermal watch work as
+          soon as the app opens. **Closed-lid mode additionally needs the root
+          helper** — the menu's Closed-lid row installs it and asks for your
+          password once.
+
+          Before trusting it overnight, verify the deadman switch from a clone
+          of the repo:
+
+          ```sh
+          ./Script/verify-deadman.sh
+          ```
+
+          It enables closed-lid mode, `kill -9`s the app, and checks that
+          `pmset disablesleep` returns to `0`. That revert is the entire
+          difference between Liddy and a raw `pmset -a disablesleep 1`.
+
+          A closed lid cuts off the main airflow path. Hard ventilated surface,
+          on mains power. Never a bag, a bed, or a drawer.
+
+          Requires macOS 14+ on Apple silicon.
+
+          ## Verify the download
+
+          EOF
+          {
+            echo '```'
+            echo "${{ steps.package.outputs.sha }}  ${{ steps.package.outputs.name }}"
+            echo '```'
+          } >> NOTE.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ steps.version.outputs.version }}" \
+            "${{ steps.package.outputs.name }}" \
+            --title "Liddy ${{ steps.version.outputs.version }}" \
+            --notes-file NOTE.md
