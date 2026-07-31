@@ -1,7 +1,7 @@
 import Foundation
 import LiddyKit
 
-let cliVersion = "0.1.0"
+let cliVersion = LiddyVersion.current
 
 func out(_ text: String) { print(text) }
 func fail(_ text: String) -> Never {

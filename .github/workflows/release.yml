@@ -37,6 +37,16 @@ jobs:
       - name: Report toolchain
         run: swift --version
 
+      # One constant feeds the CLI, the helper, the app's About box and
+      # Info.plist, so stamping it here is what stops a v0.2.0 tag shipping a
+      # binary that still says 0.1.0.
+      - name: Stamp version
+        run: |
+          file=Sources/LiddyKit/Model/LiddyVersion.swift
+          sed -i '' 's/static let current = ".*"/static let current = "${{ steps.version.outputs.version }}"/' "$file"
+          grep -q 'static let current = "${{ steps.version.outputs.version }}"' "$file" \
+            || { echo "::error::version stamp did not take in $file"; exit 1; }
+
       - name: Test
         run: swift test
 
@@ -44,7 +54,6 @@ jobs:
       # rather than patched into the product afterwards.
       - name: Build bundle
         env:
-          VERSION: ${{ steps.version.outputs.version }}
           BUILD: ${{ github.run_number }}
         run: ./Script/build-app.sh release
 
@@ -59,8 +68,16 @@ jobs:
           test -x "$app/Contents/Helpers/liddy-helper"   || { echo "::error::root helper missing"; exit 1; }
           test -f "$app/Contents/Resources/Liddy.icns"   || { echo "::error::icon missing"; exit 1; }
           /usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" "$app/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app/Contents/Info.plist"
           codesign --verify --deep --strict --verbose=2 "$app"
+
+          # Finder, the CLI and the tag must all say the same number, or the
+          # download is a different thing from the release it sits under.
+          want="${{ steps.version.outputs.version }}"
+          plist=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app/Contents/Info.plist")
+          cli=$("$app/Contents/Helpers/liddy" --version)
+          echo "tag=$want plist=$plist cli=$cli"
+          [ "$plist" = "$want" ] || { echo "::error::Info.plist says $plist, tag says $want"; exit 1; }
+          [ "$cli" = "$want" ]   || { echo "::error::liddy --version says $cli, tag says $want"; exit 1; }
 
       # A headless smoke test. `doctor` touches IOKit, pmset and the socket path
       # without opening any UI; on a runner with no app running it reports a

@@ -18,7 +18,7 @@ import LiddyKit
 /// The privileged surface is deliberately three messages wide. The helper never runs
 /// a command the app hands it.
 
-let version = "0.1.0"
+let version = LiddyVersion.current
 
 /// Three missed heartbeats at the app's 5s interval.
 let deadmanSecond = 15

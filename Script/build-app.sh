@@ -9,11 +9,13 @@ cd "$(dirname "$0")/.."
 CONFIG="${1:-release}"
 APP="dist/Liddy.app"
 
-# Stamped into the bundle so Finder and the About box agree with the tag a
-# release was cut from. The release workflow sets both; a local build gets the
-# development defaults.
-VERSION="${VERSION:-0.1.0}"
+# Stamped into the bundle so Finder cannot disagree with what `liddy --version`
+# prints — both come from LiddyVersion.current, which the release workflow
+# rewrites from the tag. BUILD is a monotonic counter CI supplies; locally it is
+# meaningless and stays 1.
+VERSION="${VERSION:-$(sed -n 's/.*static let current = "\(.*\)".*/\1/p' Sources/LiddyKit/Model/LiddyVersion.swift)}"
 BUILD="${BUILD:-1}"
+[[ -n "$VERSION" ]] || { echo "could not read version from Sources/LiddyKit/Model/LiddyVersion.swift" >&2; exit 1; }
 
 echo "==> building ($CONFIG)"
 swift build -c "$CONFIG" --product LiddyApp
