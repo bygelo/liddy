@@ -537,6 +537,24 @@ final class OverrideRuntimeTest: XCTestCase {
         XCTAssertEqual(runtime.snapshot.blockedBy, .batteryFloor)
     }
 
+    func testStoppingCancelsAnActiveOverride() {
+        let power = Power()
+        let runtime = makeRuntime(power)
+        defer { runtime.shutdown() }
+
+        runtime.setOverride(second: 1800)
+        _ = runtime.snapshot
+        XCTAssertTrue(runtime.snapshot.isAwakeHeld)
+        XCTAssertNotNil(runtime.snapshot.overrideUntil)
+
+        runtime.endHold(reason: .userStopped)
+        _ = runtime.snapshot
+
+        XCTAssertFalse(runtime.snapshot.isAwakeHeld)
+        XCTAssertNil(runtime.snapshot.overrideUntil)
+        XCTAssertTrue(runtime.snapshot.isUserPaused)
+    }
+
     /// A recovered machine does not need the override any more, and it should not stay
     /// armed silently.
     func testOverrideExpiryReturnsToNormalRules() {

@@ -88,7 +88,9 @@ final class AppModel: ObservableObject {
     }
 
     func hold(forSecond second: Int) {
-        runtime.beginHold(second: second, mode: .smart)
+        // A duration is an explicit promise, not a maximum for a smart hold that can
+        // release as soon as its idle window expires.
+        runtime.beginHold(second: second, mode: .manual)
     }
 
     /// The one control the panel leads with. Collapses what used to be two switches,

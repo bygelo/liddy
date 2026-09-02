@@ -209,11 +209,11 @@ public final class LiddyRuntime: @unchecked Sendable {
         queue.async { [weak self] in self?.clearOverrideLocked(detail: "override cancelled") }
     }
 
-    private func clearOverrideLocked(detail: String) {
+    private func clearOverrideLocked(detail: String, publishChange: Bool = true) {
         guard overrideUntil != nil else { return }
         overrideUntil = nil
         log.append(LogEntry(kind: .note, detail: detail))
-        publish()
+        if publishChange { publish() }
     }
 
     private var isOverrideActive: Bool {
@@ -516,7 +516,13 @@ public final class LiddyRuntime: @unchecked Sendable {
     private func stopLocked(reason: StopReason) {
         // Only a hand-made stop pauses. A timer running out or work finishing is the
         // system doing its job, and the next real workload should hold normally.
-        if reason == .userStopped { isUserPaused = true }
+        if reason == .userStopped {
+            isUserPaused = true
+            // Stopping is also an explicit exit from a safety waiver. Leaving an
+            // override armed after the hold ends makes the panel report a state that
+            // is no longer true and lets a later action silently inherit the waiver.
+            clearOverrideLocked(detail: "override cancelled by stop", publishChange: false)
+        }
         if isClamshellActive { setClamshellLocked(false) }
         guard isHeld else { return }
 
