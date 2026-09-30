@@ -10,7 +10,7 @@ struct HealthSection: View {
     private var report: HealthReport? { model.snapshot.health }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 5) {
             header
 
             if let report {
@@ -20,7 +20,7 @@ struct HealthSection: View {
                         if !check.isEmpty {
                             VStack(alignment: .leading, spacing: 3) {
                                 HealthPill(title: group.display, state: report.state(of: group))
-                                ForEach(check) { HealthRow(check: $0) }
+                                ForEach(check) { HealthRow(check: $0) { model.apply($0) } }
                             }
                             .padding(.top, 2)
                         }
@@ -39,9 +39,8 @@ struct HealthSection: View {
         // instant the height changes; animating the SwiftUI side means the content
         // spends 180ms at a height the window is not, which is the jump. Whoever owns
         // the window owns the timing, and here that is AppKit.
-        Button {
-            isExpanded.toggle()
-        } label: {
+        // No toggle: this is a page now, not a disclosure. See `PanelTab`.
+        Group {
             HStack(spacing: 6) {
                 Text("HEALTH")
                     .font(.system(size: 9, weight: .semibold))
@@ -61,13 +60,8 @@ struct HealthSection: View {
                         .font(.system(size: 9).monospacedDigit())
                         .foregroundStyle(.tertiary)
                 }
-                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundStyle(.tertiary)
             }
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
     }
 
     private func headline(_ report: HealthReport) -> String {
@@ -77,19 +71,17 @@ struct HealthSection: View {
         return "\(problem.count) checks need attention"
     }
 
-    /// Collapsed: one dot per group, plus the failing rows spelled out. A problem is
-    /// never hidden behind a disclosure triangle.
+    /// Collapsed: the failing rows, and nothing else. A problem is never hidden behind
+    /// a disclosure triangle — but a *passing* group is, because the header line above
+    /// already says "All checks passing".
+    ///
+    /// The four group pills used to sit here too. They were a second drawing of a fact
+    /// the header states in words, on a panel whose complaint was its height, so they
+    /// now appear only in the expanded view where the per-group rows they label are
+    /// actually visible.
     private func summary(_ report: HealthReport) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 12) {
-                ForEach(HealthGroup.allCases, id: \.self) { group in
-                    if !report.check(in: group).isEmpty {
-                        HealthPill(title: group.display, state: report.state(of: group))
-                    }
-                }
-                Spacer()
-            }
-            ForEach(report.problem) { HealthRow(check: $0) }
+        VStack(alignment: .leading, spacing: 3) {
+            ForEach(report.problem) { HealthRow(check: $0) { model.apply($0) } }
         }
     }
 }

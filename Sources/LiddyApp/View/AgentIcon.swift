@@ -45,25 +45,30 @@ enum AppIconResolver {
 /// artwork, colour can no longer be what encodes working-vs-idle — the icons would
 /// shout over the status. Desaturation gives that job back to the panel.
 struct AgentIcon: View {
-    var status: AgentStatus
+    var symbolName: String
+    var bundleIdentifier: [String]
     var size: CGFloat = 15
+    /// Live sessions render in full colour; quiet ones desaturate. Once a row carries
+    /// vendor artwork, colour can no longer be what encodes state — the icons would
+    /// shout over it — so desaturation gives that job back to the panel.
+    var isActive: Bool = true
 
     var body: some View {
         Group {
-            if let image = AppIconResolver.icon(for: status.bundleIdentifier) {
+            if let image = AppIconResolver.icon(for: bundleIdentifier) {
                 Image(nsImage: image)
                     .resizable()
                     .interpolation(.high)
                     .aspectRatio(contentMode: .fit)
             } else {
-                Image(systemName: status.symbolName)
-                    .font(.system(size: size - 4))
-                    .foregroundStyle(status.isWorking ? Color.green : .secondary)
+                Image(systemName: symbolName)
+                    .font(.system(size: size - 3))
+                    .foregroundStyle(.secondary)
                     .frame(width: size, height: size)
             }
         }
         .frame(width: size, height: size)
-        .saturation(status.isWorking ? 1 : 0)
-        .opacity(status.isWorking ? 1 : 0.5)
+        .saturation(isActive ? 1 : 0)
+        .opacity(isActive ? 1 : 0.55)
     }
 }

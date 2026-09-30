@@ -86,14 +86,43 @@ public final class LiddyRuntime: @unchecked Sendable {
     /// hold. Testing that requires being able to say what the battery is.
     private let readBattery: () -> BatteryReading
     private let readThermal: () -> ThermalReading
+    private let dimmer: DisplayDimmer
+    private let backgrounder: AppBackgrounding
+    /// Apps this feature hid and has not given back. Never "apps that are hidden" —
+    /// see `ResourcePlan.plan`.
+    private var hiddenApp: [String] = []
+    /// Last load sample. Held rather than taken per snapshot: `makeSnapshot()` runs on
+    /// every publish, and forking `ps` on each one would make the panel itself one of
+    /// the processes hampering performance.
+    private var topLoad: [ProcessLoad] = []
+    /// Tab Warden's view of every live CLI agent session, refreshed on the same
+    /// cadence as the load sample.
+    private var session: [AgentSession] = []
+    private var cpuPercent: Double?
+    /// `ps` is ~15ms; every third tick is 15 seconds, which is faster than the list
+    /// meaningfully changes and slow enough to be free.
+    private static let loadEveryTick = 3
+    /// While nothing is watching, the session list is still needed by the resource
+    /// saver — but once a minute, not four times.
+    private static let backgroundSampleEveryTick = 12
+    /// Fires to skip while idle. 3 turns the 5-second tick into 15 seconds.
+    private static let idleEveryTick = 3
+    private var idleTickCount = 0
+    /// Whether the panel is on screen. Set by the app; the CLI never sets it, which is
+    /// correct — a `liddy status` call does not want a process scan behind it either.
+    private var isPanelVisible = false
 
     public init(
         setting: Setting = .load(),
         log: ActivityLog = ActivityLog(),
         helper: HelperClient = HelperClient(),
         battery: @escaping () -> BatteryReading = BatteryReader.read,
-        thermal: @escaping () -> ThermalReading = ThermalReader.read
+        thermal: @escaping () -> ThermalReading = ThermalReader.read,
+        dimmer: DisplayDimmer = DisplayDimmer(),
+        backgrounder: AppBackgrounding = NoAppBackgrounding()
     ) {
+        self.dimmer = dimmer
+        self.backgrounder = backgrounder
         self.readBattery = battery
         self.readThermal = thermal
         self.setting = setting.normalized()
@@ -113,6 +142,11 @@ public final class LiddyRuntime: @unchecked Sendable {
     // MARK: - Lifecycle
 
     public func start() {
+        // The panel starts closed, so the idle temperature cadence applies from launch.
+        // Setting it only on a visibility *change* meant an app whose panel was never
+        // opened kept the 10-second cadence forever — the exact case that matters,
+        // because a menu-bar utility is closed almost all of the time.
+        TemperatureReader.setMaxAge(second: 120)
         networkPath.start()
         queue.async { [weak self] in
             guard let self, self.timer == nil else { return }
@@ -133,14 +167,138 @@ public final class LiddyRuntime: @unchecked Sendable {
             watcher.stop()
             if isClamshellActive { setClamshellLocked(false) }
             if isHeld { stopLocked(reason: .appQuit) }
+            // Two things that outlive this process if they are not undone here: a dark
+            // panel, and somebody else's hidden windows. Quitting Liddy and losing
+            // Chrome would be indistinguishable from Chrome crashing.
+            if dimmer.restore() { log.append(LogEntry(kind: .safetyWarned, detail: "brightness restored on quit")) }
+            releaseBackgroundedAppLocked()
             helper.disconnect()
         }
+    }
+
+
+    // MARK: - Brightness and resource saving
+
+    /// One tick of the two "while a run is in progress" features.
+    ///
+    /// Both are written as plan-then-apply rather than as `if` statements sprinkled
+    /// through the tick, because both own something that belongs to the user — the
+    /// backlight, and another app's windows — and the rules for giving those back are
+    /// where the bugs live. `DimmingPlan` and `ResourcePlan` hold those rules and are
+    /// tested on their own.
+    private func applyPowerSavingLocked() {
+        // One lid reading per tick, shared.
+        //
+        // `ClamshellProbe.isLidClosed()` forks `ioreg`; this method asked for it twice
+        // — once through the dimmer and once for the resource plan — so every tick
+        // paid for two subprocesses to answer the same question a millisecond apart.
+        let isLidClosed = ClamshellProbe.isLidClosed()
+        // Brightness is scoped to Liddy's own closed-lid session. Outside one, a shut
+        // lid is somebody else's business.
+        let plan = dimmer.update(
+            isEnabled: setting.isLidBrightnessOff && isClamshellActive,
+            isLidClosed: isLidClosed)
+        if let level = plan.apply {
+            log.append(LogEntry(
+                kind: .safetyWarned,
+                detail: level == 0
+                    ? "lid shut, backlight off"
+                    : "lid open, backlight back to \(Int(level * 100))%"))
+        }
+
+        let resource = ResourcePlan.plan(
+            isEnabled: setting.isResourceSaverOn,
+            isHolding: isHeld || isClamshellActive,
+            wanted: setting.backgroundApp,
+            running: backgrounder.runningAppName(),
+            hidden: hiddenApp,
+            frontmost: backgrounder.frontmostAppName(),
+            // The lid, not the mode: closed-lid mode can be armed with the lid open on
+            // an external display, and that is a desktop the user is still looking at.
+            isLidClosed: isLidClosed ?? false,
+            sessionApp: session.map(\.tool.label))
+        applyResourceLocked(resource)
+    }
+
+    private func applyResourceLocked(_ plan: ResourcePlan) {
+        guard !plan.isEmpty else { return }
+        for name in plan.hide where backgrounder.hide(name) {
+            hiddenApp.append(name)
+        }
+        for name in plan.unhide {
+            backgrounder.unhide(name)
+            hiddenApp.removeAll { $0.caseInsensitiveCompare(name) == .orderedSame }
+        }
+        if !plan.hide.isEmpty {
+            log.append(LogEntry(kind: .safetyWarned, detail: "backgrounded \(plan.hide.joined(separator: ", "))"))
+        }
+        if !plan.unhide.isEmpty {
+            log.append(LogEntry(kind: .safetyWarned, detail: "restored \(plan.unhide.joined(separator: ", "))"))
+        }
+    }
+
+    /// Name what was eating the machine at the moment it stopped.
+    ///
+    /// "Battery crossed the floor" tells you the rule that fired; it does not tell you
+    /// that Chrome was at 95% for the last hour, which is the part that would have let
+    /// the run finish. The reading is a fresh sample rather than the cached one: at a
+    /// stop it is worth 15ms to be accurate about the thing the user will read tomorrow
+    /// morning.
+    private func logHeaviestLocked(atStop reason: StopReason) {
+        let heaviest = ProcessLoad.top(ProcessLoad.sample(), limit: 3, minimumCpuPercent: 10)
+        guard !heaviest.isEmpty else { return }
+        log.append(LogEntry(
+            kind: .safetyWarned,
+            detail: "heaviest at stop: " + heaviest.map(\.display).joined(separator: ", "),
+            reason: reason))
+    }
+
+    /// Unconditional give-back, for quit and for a safety stop.
+    private func releaseBackgroundedAppLocked() {
+        guard !hiddenApp.isEmpty else { return }
+        applyResourceLocked(ResourcePlan(hide: [], unhide: hiddenApp))
     }
 
     // MARK: - Commands
 
     public func beginHold(second: Int?, mode: HoldMode) {
         queue.async { [weak self] in self?.beginHoldLocked(second: second, mode: mode) }
+    }
+
+    /// Clear `disablesleep` when nothing is watching it.
+    ///
+    /// The health panel's "Clear it" button. It goes through the helper like every
+    /// other change to that toggle — the deadman switch is the reason it is safe for
+    /// the helper to own it, and a `pmset` call from the app would step around it.
+    /// Told by the app when the panel opens and closes. See `tick`.
+    public func setPanelVisible(_ isVisible: Bool) {
+        queue.async { [weak self] in
+            guard let self, self.isPanelVisible != isVisible else { return }
+            self.isPanelVisible = isVisible
+            // 40ms of driver IPC for a number nobody can read is 40ms wasted. Two
+            // minutes stale while shut is still fresh enough for the first draw when
+            // the panel opens, and the open path re-reads anyway.
+            TemperatureReader.setMaxAge(second: isVisible ? 10 : 120)
+            // Opening the panel should not show a minute-old process list, so take the
+            // samples it needs immediately rather than waiting for the next boundary.
+            if isVisible { self.sampleForPanelLocked() }
+        }
+    }
+
+    private func sampleForPanelLocked() {
+        let sample = ProcessLoad.sample()
+        topLoad = ProcessLoad.top(sample)
+        cpuPercent = ProcessLoad.systemCpuPercent(sample)
+        session = SessionScanner.scan(live: SessionScanner.live())
+        publish()
+    }
+
+    public func clearStuckClamshell() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.setClamshellLocked(false)
+            self.log.append(LogEntry(kind: .helperReverted, detail: "disablesleep cleared from the health panel"))
+        }
     }
 
     public func endHold(reason: StopReason = .userStopped) {
@@ -586,8 +744,28 @@ public final class LiddyRuntime: @unchecked Sendable {
     }
 
     private func tick() {
-        let battery = readBattery()
-        let thermal = readThermal()
+        // Idle and unwatched: work once every third fire.
+        //
+        // The 5-second cadence exists for a run in progress — the governor has to
+        // notice a battery floor or a thermal ceiling quickly, and the helper's deadman
+        // wants a heartbeat. None of that applies when nothing is held and the panel is
+        // shut: the only consumer is the menu-bar battery percentage, and 15 seconds is
+        // finer than that number moves. The timer keeps its period so a hold starting
+        // between fires is picked up at the next one.
+        idleTickCount += 1
+        // "Idle" has to mean *nothing is owed*, not just "nothing is held".
+        //
+        // Caught by `testHoldBackgroundsTheConfiguredAppAndReleaseGivesThemBack`: a run
+        // that ends leaves hidden windows and possibly a dimmed panel, and the tick
+        // right after it is the one that gives them back — which is exactly the tick
+        // that now looked idle. Skipping it stranded another app's windows.
+        let isOwing = !hiddenApp.isEmpty || dimmer.dimmedFrom != nil
+        let isIdle = !isHeld && !isClamshellActive && !isPanelVisible
+            && safetyLock == nil && !isOwing
+        if isIdle, idleTickCount % Self.idleEveryTick != 0 { return }
+
+        let battery = TickProfile.measure("battery") { readBattery() }
+        let thermal = TickProfile.measure("thermal") { readThermal() }
 
         // Sampled and probed before the safety guard below, not after: an idle Mac is
         // exactly when you want to look at the panel and see that the network and the
@@ -600,9 +778,43 @@ public final class LiddyRuntime: @unchecked Sendable {
             isHeld: isHeld
         ))
 
+        // Before the `guard isHeld || isClamshellActive` below: the release half of both
+        // features has to run on the tick *after* a hold ends, which is a tick that
+        // returns early.
+        TickProfile.measure("powerSaving") { applyPowerSavingLocked() }
+        // Sample only for someone who is looking.
+        //
+        // `ProcessLoad.sample` is 96ms and `SessionScanner.scan` was 153ms — together
+        // nearly 1.7 CPU-seconds a minute at a 15-second cadence, for two readings that
+        // appear **only** inside the panel. With the panel shut they were being computed
+        // for nobody. The menu-bar icon needs the battery and the hold state, and both
+        // are microseconds.
+        //
+        // The resource saver is the one background consumer: it needs the session list
+        // to know which apps are hosting live work. It gets it once a minute.
+        let sampleInterval = isPanelVisible
+            ? Self.loadEveryTick
+            : (setting.isResourceSaverOn ? Self.backgroundSampleEveryTick : 0)
+
+        if sampleInterval > 0, tickCount % sampleInterval == 0 {
+            let sample = TickProfile.measure("processLoad") { ProcessLoad.sample() }
+            topLoad = ProcessLoad.top(sample)
+            cpuPercent = ProcessLoad.systemCpuPercent(sample)
+            session = TickProfile.measure("sessionScan") {
+                SessionScanner.scan(live: SessionScanner.live())
+            }
+        }
+
         tickCount += 1
-        if tickCount % Self.healthEveryTick == 1 {
-            refreshHealthLocked(battery: battery, thermal: thermal)
+        if TickProfile.isEnabled, tickCount % 12 == 0 { TickProfile.report() }
+        // The health sweep still runs with the panel shut — the menu-bar glyph turns
+        // into a warning triangle from it, which is the whole point of running it
+        // unattended — but at a quarter of the rate. `pmset -g` alone is 82ms.
+        let healthInterval = isPanelVisible ? Self.healthEveryTick : Self.healthEveryTick * 4
+        if tickCount % healthInterval == 1 {
+            TickProfile.measure("healthSweep") {
+                refreshHealthLocked(battery: battery, thermal: thermal)
+            }
         }
 
         // Lock maintenance runs *before* the guard below, because a lock is held while
@@ -647,13 +859,20 @@ public final class LiddyRuntime: @unchecked Sendable {
                 thermal: thermal.level
             ))
             onAlert?("Sleeping your Mac: \(reason.summary)")
+            logHeaviestLocked(atStop: reason)
             stopLocked(reason: reason)
+            // Give the hold up *before* asking for sleep, and give other apps their
+            // windows back too: a Mac that wakes up tomorrow with Chrome hidden and no
+            // record of why is the failure this feature would otherwise introduce.
+            releaseBackgroundedAppLocked()
+            _ = dimmer.restore()
             try? helper.sleepNow(reason: reason.summary)
             return
 
         case .release(let reason):
             engageSafetyLockLocked(reason)
             onAlert?("Releasing your Mac: \(reason.summary)")
+            logHeaviestLocked(atStop: reason)
             stopLocked(reason: reason)
             return
 
@@ -714,12 +933,17 @@ public final class LiddyRuntime: @unchecked Sendable {
             blockedBy: safetyLock,
             isAutoWatchOn: isAutoWatchOn,
             isUserPaused: isUserPaused,
-            overrideUntil: isOverrideActive ? overrideUntil : nil
+            overrideUntil: isOverrideActive ? overrideUntil : nil,
+            topLoad: topLoad,
+            backgroundedApp: hiddenApp,
+            dimmedFrom: dimmer.dimmedFrom,
+            session: session,
+            cpuPercent: cpuPercent
         )
     }
 
     private func publish() {
-        let snapshot = makeSnapshot()
+        let snapshot = TickProfile.measure("makeSnapshot") { makeSnapshot() }
         DispatchQueue.main.async { [onChange] in onChange?(snapshot) }
     }
 }

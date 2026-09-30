@@ -47,7 +47,14 @@ public struct HealthContext: Sendable {
 /// probing off. The panel therefore always has something true to draw, even offline.
 public actor HealthProbe {
     private let path: NetworkPathObserver
-    private let session: URLSession
+    /// Built per sweep and torn down after.
+    ///
+    /// Measured: turning the network probe off dropped resident memory by **25 MB**,
+    /// which is CFNetwork and its TLS machinery, not the response cache (the config is
+    /// already `.ephemeral` with `urlCache = nil`). Sweeps are two minutes apart when
+    /// nobody is watching, so there is no connection worth keeping alive between them —
+    /// keep-alive would have expired regardless.
+    private let configuration: URLSessionConfiguration
     /// Previous verdict per remote check, for the flap filter in `settled`.
     private var lastRemoteState: [String: HealthState] = [:]
 
@@ -63,7 +70,7 @@ public actor HealthProbe {
         config.allowsConstrainedNetworkAccess = false
         config.httpCookieStorage = nil
         config.urlCache = nil
-        self.session = URLSession(configuration: config)
+        self.configuration = config
     }
 
     public func run(context: HealthContext) async -> HealthReport {
@@ -86,22 +93,29 @@ public actor HealthProbe {
     public static func localCheck(
         context: HealthContext,
         path: NetworkPathReading,
-        pmsetText: String? = nil
+        pmsetText: String? = nil,
+        bundlePath: String = Bundle.main.bundlePath
     ) -> [HealthCheck] {
-        liddyCheck(context: context, pmsetText: pmsetText)
+        liddyCheck(context: context, pmsetText: pmsetText, bundlePath: bundlePath)
             + deviceCheck(context: context)
             + linkCheck(path: path)
     }
 
-    static func liddyCheck(context: HealthContext, pmsetText: String? = nil) -> [HealthCheck] {
+    static func liddyCheck(
+        context: HealthContext,
+        pmsetText: String? = nil,
+        bundlePath: String = Bundle.main.bundlePath
+    ) -> [HealthCheck] {
         var check: [HealthCheck] = []
+        check.append(AppInstall.healthCheck(bundlePath: bundlePath))
 
         check.append(HealthCheck(
             id: "liddy.socket", group: .liddy, label: "CLI socket",
             state: context.isSocketBound ? .ok : .down,
             detail: context.isSocketBound
                 ? LiddyPath.appSocket.path
-                : "not bound. The liddy command cannot reach the app"))
+                : "not bound. The liddy command cannot reach the app",
+            remedy: context.isSocketBound ? nil : .refresh))
 
         // A hold with no assertion behind it is the one failure that looks fine and
         // isn't: the menu says "keeping awake" while the Mac quietly sleeps anyway.
@@ -151,10 +165,14 @@ public actor HealthProbe {
         }
         check.append(HealthCheck(
             id: "liddy.helper", group: .liddy, label: "Helper daemon",
-            state: helperState, detail: helperDetail))
+            state: helperState, detail: helperDetail,
+            remedy: helperState == .ok ? nil : .installHelper))
 
-        let text = pmsetText ?? PmsetReader.output()
-        let isDisableSleepOn = PmsetReader.isDisableSleepOn(text)
+        // The registry answers the only question this check asks, so the `pmset` fork
+        // happens only when a caller handed us its text (the CLI's doctor, which is
+        // printing the whole dump anyway).
+        let isDisableSleepOn = pmsetText.map(PmsetReader.isDisableSleepOn)
+            ?? PmsetReader.isDisableSleepOn()
         let sleepState: HealthState
         let sleepDetail: String
         switch (isDisableSleepOn, context.isClamshellActive) {
@@ -165,13 +183,17 @@ public actor HealthProbe {
         }
         check.append(HealthCheck(
             id: "liddy.sleep", group: .liddy, label: "Sleep policy",
-            state: sleepState, detail: sleepDetail))
+            state: sleepState, detail: sleepDetail,
+            // A `disablesleep` nobody is watching is the single most dangerous state
+            // this product can leave a Mac in, so it gets the most direct button.
+            remedy: sleepState == .ok ? nil : .clearDisableSleep))
 
         let isHookInstalled = isClaudeHookInstalled()
         check.append(HealthCheck(
             id: "liddy.hook", group: .liddy, label: "Claude Code hook",
             state: isHookInstalled ? .ok : .off,
-            detail: isHookInstalled ? "installed, holds per turn" : "not installed. Run liddy hook install"))
+            detail: isHookInstalled ? "installed, holds per turn" : "not installed. Run liddy hook install",
+            remedy: isHookInstalled ? nil : .installHook))
 
         return check
     }
@@ -285,6 +307,9 @@ public actor HealthProbe {
     }
 
     private func remoteCheck(context: HealthContext, path: NetworkPathReading) async -> [HealthCheck] {
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+
         // Offline is already reported by the link check; probing anyway would just add
         // four identical red rows and a four-second stall.
         guard path.isSatisfied else {
@@ -312,9 +337,9 @@ public actor HealthProbe {
         var check = [await dns]
         check += await withTaskGroup(of: HealthCheck.self) { group in
             for target in endpoint {
-                group.addTask { await self.endpointCheck(target) }
+                group.addTask { await self.endpointCheck(target, session: session) }
             }
-            group.addTask { await self.statusPageCheck() }
+            group.addTask { await self.statusPageCheck(session: session) }
             var collected: [HealthCheck] = []
             for await one in group { collected.append(one) }
             return collected.sorted { $0.id < $1.id }
@@ -404,7 +429,7 @@ public actor HealthProbe {
         }
     }
 
-    private func endpointCheck(_ endpoint: ServiceEndpoint) async -> HealthCheck {
+    private func endpointCheck(_ endpoint: ServiceEndpoint, session: URLSession) async -> HealthCheck {
         var request = URLRequest(url: endpoint.url)
         request.httpMethod = "HEAD"
         request.setValue("liddy-health", forHTTPHeaderField: "User-Agent")
@@ -436,7 +461,7 @@ public actor HealthProbe {
         }
     }
 
-    private func statusPageCheck() async -> HealthCheck {
+    private func statusPageCheck(session: URLSession) async -> HealthCheck {
         do {
             let (data, _) = try await session.data(from: ServiceStatusPage.anthropic)
             guard let parsed = ServiceStatusPage.parse(data) else {

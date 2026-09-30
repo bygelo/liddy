@@ -43,9 +43,9 @@ public final class ProcessWatcher {
     }
 
     /// Returns the matched pattern, not the process name, so the log reads
-    /// "claude" rather than a full argv line.
+    /// "claude" rather than a full `comm=` path.
     public func scanOnce() -> [String] {
-        let table = Self.processTable()
+        let table = TickProfile.measure("processWatch") { Self.processTable() }
         guard !table.isEmpty else { return [] }
         let selfPid = ProcessInfo.processInfo.processIdentifier
 
@@ -61,10 +61,23 @@ public final class ProcessWatcher {
         return matched.sorted()
     }
 
-    /// Reduce a `ps` row to the bare executable name: first whitespace-separated
-    /// token (`npm exec foo` → `npm`), then its last path component.
-    static func executableName(from command: String) -> String {
-        let token = command.split(separator: " ", maxSplits: 1).first.map(String.init) ?? command
+    /// Reduce a `ps -Ao comm=` row to the bare executable name.
+    ///
+    /// `comm=` returns two shapes on the same machine, measured on macOS 15: an
+    /// **absolute path**, which may contain spaces and never carries arguments
+    /// (`/Applications/Visual Studio Code.app/Contents/MacOS/Electron` — 166 such rows
+    /// on this desk), and a **bare command with its argument** for anything invoked
+    /// without a path (`npm run dev --host 127.0.0.1`). No absolute row was observed
+    /// carrying a flag, so the leading `/` is what decides which rule applies.
+    ///
+    /// Splitting on the first space unconditionally — the previous implementation —
+    /// reduced the spaced-path case to `visual`, so any watched tool installed at a
+    /// spaced path silently never matched.
+    public static func executableName(from command: String) -> String {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        let token = trimmed.hasPrefix("/")
+            ? trimmed
+            : trimmed.split(separator: " ", maxSplits: 1).first.map(String.init) ?? trimmed
         return (token as NSString).lastPathComponent.lowercased()
     }
 
@@ -78,7 +91,7 @@ public final class ProcessWatcher {
     ///
     /// The version-suffix rule keeps `python3` and `python3.13` matching `python`,
     /// which is the only loosening that turned out to be worth having.
-    static func matches(executableName: String, pattern: String) -> Bool {
+    public static func matches(executableName: String, pattern: String) -> Bool {
         let wanted = pattern.lowercased()
         if executableName == wanted { return true }
         guard executableName.hasPrefix(wanted) else { return false }
@@ -86,34 +99,16 @@ public final class ProcessWatcher {
         return !suffix.isEmpty && suffix.allSatisfy { $0.isNumber || $0 == "." || $0 == "-" }
     }
 
-    struct ProcessRow {
-        var pid: Int32
-        var command: String
+    public struct ProcessRow {
+        public var pid: Int32
+        public var command: String
     }
 
-    /// `ps` rather than `sysctl(KERN_PROC)`: it is stable across macOS releases, needs
-    /// no entitlement, and this runs once every 10 seconds — not a hot path.
-    static func processTable() -> [ProcessRow] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-Ao", "pid=,comm="]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-
-        do { try process.run() } catch { return [] }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-
-        return String(decoding: data, as: UTF8.self)
-            .split(separator: "\n")
-            .compactMap { line in
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                guard let space = trimmed.firstIndex(of: " "),
-                      let pid = Int32(trimmed[trimmed.startIndex..<space])
-                else { return nil }
-                let command = trimmed[trimmed.index(after: space)...].trimmingCharacters(in: .whitespaces)
-                return ProcessRow(pid: pid, command: command)
-            }
+    /// Read in-process — see `NativeProcess` for why not `ps`, and for how closely the
+    /// rows match what `ps -Ao pid=,comm=` printed.
+    public static func processTable() -> [ProcessRow] {
+        NativeProcess.allPid().compactMap { pid in
+            NativeProcess.command(of: pid).map { ProcessRow(pid: pid, command: $0) }
+        }
     }
 }

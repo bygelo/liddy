@@ -39,6 +39,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var resizeSink: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Measure and leave, before anything takes a lock on the machine: no socket, no
+        // helper connection, no watcher. See `MenuPanelController.isMeasuring`.
+        if MenuPanelController.isMeasuring {
+            installStatusItem()
+            let controller = MenuPanelController(rootView: MenuView(model: model))
+            controller.reportGeometry(button: statusItem?.button)
+            // `LIDDY_MEASURE_PANEL=open` watches an actually-open panel over several
+            // layout passes; anything else measures the content once and leaves.
+            // `LIDDY_MEASURE_PANEL=snapshot LIDDY_SNAPSHOT_DIR=/tmp/x` writes every page,
+            // light and dark, to PNG — so "the tab bar looks wrong" is checked against a
+            // picture rather than a description. The model is not started: the pages
+            // draw their empty state, which is enough for layout and never touches the
+            // running app's socket.
+            if ProcessInfo.processInfo.environment["LIDDY_MEASURE_PANEL"] == "snapshot" {
+                PanelSnapshot.writeEveryPage(model: model)
+            }
+            if ProcessInfo.processInfo.environment["LIDDY_MEASURE_PANEL"] == "open" {
+                // Start the model too. Without it there are no ticks, no health sweeps
+                // and no publishes — so the backstop resize sink never fires, which is
+                // precisely the traffic the panel was misbehaving under. A harness that
+                // skips it measures a panel nobody is using.
+                model.start()
+                panelController = controller
+                installPanelResize(controller)
+                controller.openAndWatch(button: statusItem?.button)
+            }
+            controller.measureAndExit()
+        }
         model.start()
         installStatusItem()
         installPanel()
@@ -55,51 +83,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.target = self
         item.button?.action = #selector(togglePopover(_:))
         statusItem = item
-        applyIcon(Icon(model.snapshot))
+        applyIcon(MenuBarIcon(model.snapshot))
 
         // Deduplicated: the runtime publishes every 5s, but the glyph changes rarely.
         // Reassigning the image on every tick would redraw the menu bar for nothing.
+        // Battery percent is part of the identity, so a 1% drop still lands.
         iconSink = model.$snapshot
-            .map(Icon.init)
+            .map(MenuBarIcon.init)
             .removeDuplicates()
             .sink { icon in
                 DispatchQueue.main.async { [weak self] in self?.applyIcon(icon) }
             }
     }
 
-    private func applyIcon(_ icon: Icon) {
-        statusItem?.button?.image = NSImage(
+    private func applyIcon(_ icon: MenuBarIcon) {
+        guard let button = statusItem?.button else { return }
+        button.image = NSImage(
             systemSymbolName: icon.symbolName,
             accessibilityDescription: icon.label
         )
-    }
-
-    /// The glyph and the words for it, kept together so the menu bar is legible to
-    /// VoiceOver — and so a test can read the state back without screenshotting a
-    /// 16-point icon.
-    struct Icon: Equatable {
-        var symbolName: String
-        var label: String
-
-        /// A broken check outranks the hold state. Whether the Mac is awake is visible
-        /// everywhere; that the helper died three hours into an overnight run is visible
-        /// nowhere else, so it takes the glyph.
-        init(_ snapshot: RuntimeSnapshot) {
-            if snapshot.health?.overall == .down {
-                self.init(symbolName: "exclamationmark.triangle.fill", label: "Liddy: a check is failing")
-            } else if snapshot.isClamshellActive {
-                self.init(symbolName: "laptopcomputer.slash", label: "Liddy: protected, lid can close")
-            } else if snapshot.isAwakeHeld {
-                self.init(symbolName: "bolt.fill", label: "Liddy: keeping awake")
-            } else {
-                self.init(symbolName: "bolt.slash", label: "Liddy: idle")
-            }
-        }
-
-        private init(symbolName: String, label: String) {
-            self.symbolName = symbolName
-            self.label = label
-        }
+        // Image then percent, the shape every menu-bar meter uses. A title with no
+        // imagePosition set lands on top of the glyph on some macOS versions.
+        button.imagePosition = .imageLeading
+        button.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        button.title = icon.batteryTitle ?? ""
+        button.toolTip = icon.label
     }
 
     // MARK: - Panel
@@ -107,12 +115,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func installPanel() {
         let controller = MenuPanelController(rootView: MenuView(model: model))
         panelController = controller
+        installPanelResize(controller)
+    }
+
+    private func installPanelResize(_ controller: MenuPanelController) {
+        controller.onVisibilityChange = { [weak self] isVisible in
+            self?.model.setPanelVisible(isVisible)
+        }
+
 
         // The panel sizes itself to the SwiftUI content, so it has to be told when that
         // content changed. `objectWillChange` fires *before* the change lands, hence the
         // hop to the next runloop pass — by then SwiftUI has re-laid-out and
         // `fittingSize` is the new height. This is what makes a disclosure grow the
         // window instead of getting clipped by it.
+        // A backstop, not the mechanism. The panel now follows its own content from
+        // `MeasuringHostingView.onLayout`, in the same pass the content changes; this
+        // catches the case where a model update changes the height without SwiftUI
+        // laying the hosting view out again.
         resizeSink = model.objectWillChange
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in

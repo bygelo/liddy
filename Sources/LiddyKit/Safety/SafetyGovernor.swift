@@ -91,7 +91,7 @@ public struct SafetyGovernor: Sendable {
 
         // 5. Charging-only mode.
         if setting.isChargingOnly, !battery.isOnMain {
-            return .release(.userStopped)
+            return .release(.chargingOnly)
         }
 
         // Warnings — the run continues, but the menu bar should say something.

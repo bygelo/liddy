@@ -45,6 +45,10 @@ public struct SettingPatch: Codable, Sendable {
     public var isChargingOnly: Bool?
     public var thermalCeiling: ThermalLevel?
     public var isNetworkProbeOn: Bool?
+    public var isHealthPanelOn: Bool?
+    public var isLidBrightnessOff: Bool?
+    public var isResourceSaverOn: Bool?
+    public var backgroundApp: [String]?
 
     public init(
         softBatteryPercent: Int? = nil,
@@ -52,7 +56,11 @@ public struct SettingPatch: Codable, Sendable {
         idleReleaseSecond: Int? = nil,
         isChargingOnly: Bool? = nil,
         thermalCeiling: ThermalLevel? = nil,
-        isNetworkProbeOn: Bool? = nil
+        isNetworkProbeOn: Bool? = nil,
+        isHealthPanelOn: Bool? = nil,
+        isLidBrightnessOff: Bool? = nil,
+        isResourceSaverOn: Bool? = nil,
+        backgroundApp: [String]? = nil
     ) {
         self.softBatteryPercent = softBatteryPercent
         self.hardBatteryPercent = hardBatteryPercent
@@ -60,11 +68,16 @@ public struct SettingPatch: Codable, Sendable {
         self.isChargingOnly = isChargingOnly
         self.thermalCeiling = thermalCeiling
         self.isNetworkProbeOn = isNetworkProbeOn
+        self.isHealthPanelOn = isHealthPanelOn
+        self.isLidBrightnessOff = isLidBrightnessOff
+        self.isResourceSaverOn = isResourceSaverOn
+        self.backgroundApp = backgroundApp
     }
 
     public var isEmpty: Bool {
         softBatteryPercent == nil && hardBatteryPercent == nil && idleReleaseSecond == nil
             && isChargingOnly == nil && thermalCeiling == nil && isNetworkProbeOn == nil
+            && isHealthPanelOn == nil && isLidBrightnessOff == nil && isResourceSaverOn == nil && backgroundApp == nil
     }
 
     public func applied(to setting: Setting) -> Setting {
@@ -75,6 +88,10 @@ public struct SettingPatch: Codable, Sendable {
         if let isChargingOnly { copy.isChargingOnly = isChargingOnly }
         if let thermalCeiling { copy.thermalCeiling = thermalCeiling }
         if let isNetworkProbeOn { copy.isNetworkProbeOn = isNetworkProbeOn }
+        if let isHealthPanelOn { copy.isHealthPanelOn = isHealthPanelOn }
+        if let isLidBrightnessOff { copy.isLidBrightnessOff = isLidBrightnessOff }
+        if let isResourceSaverOn { copy.isResourceSaverOn = isResourceSaverOn }
+        if let backgroundApp { copy.backgroundApp = backgroundApp }
         return copy.normalized()
     }
 }

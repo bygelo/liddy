@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Liddy — close the lid, the agent keeps working</title>
+<meta name="description" content="Closed-lid keep-awake for macOS. A root daemon owns the one setting that survives a lid close, on a deadman switch. Free, MIT, no account, no telemetry.">
+<link rel="icon" href="asset/icon.png" type="image/png">
+<meta property="og:title" content="Liddy — close the lid, the agent keeps working">
+<meta property="og:description" content="Closed-lid keep-awake for macOS. The setting reverts when Liddy stops — four independent ways. Free, MIT, every guardrail included.">
+<meta property="og:image" content="https://liddy.bygelo.com/asset/banner.png">
+<meta property="og:url" content="https://liddy.bygelo.com/">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="night" aria-hidden="true">
+  <div class="night-layer night-dusk"></div>
+  <div class="night-layer night-small-hours"></div>
+  <div class="night-layer night-dawn"></div>
+</div>
+
+<nav class="bar">
+  <a class="bar-mark" href="#top">
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><rect x="1" y="1" width="22" height="22" rx="5" fill="var(--teal)"/><path d="M6.5 8.5h11v6h-11z" fill="none" stroke="#fff" stroke-width="1.3" stroke-linejoin="round"/><path d="M5 16.5h14" stroke="#fff" stroke-width="1.3" stroke-linecap="round"/></svg>
+    <span>Liddy</span>
+  </a>
+  <div class="bar-link">
+    <a href="#lever">How</a>
+    <a href="#compare">Compare</a>
+    <a href="#install">Install</a>
+    <a href="#build" class="bar-link-lit">Contribute</a>
+    <a href="https://github.com/bygelo/liddy">GitHub&#8239;<span aria-hidden="true">↗</span></a>
+  </div>
+</nav>
+
+<div class="rail" aria-hidden="true">
+  <div class="rail-clock" id="rail-clock">23:41</div>
+  <div class="rail-track"><div class="rail-fill" id="rail-fill"></div></div>
+  <div class="rail-state" id="rail-state">holding</div>
+</div>
+
+<main id="top">
+
+<!-- ─────────────────────────── hero ─────────────────────────── -->
+<header class="hero" id="deadman">
+  <div class="hero-pitch">
+    <p class="stamp">23:41 &middot; overnight run in progress</p>
+
+    <h1 class="display">Close the lid.<br><em>The agent keeps working.</em></h1>
+
+    <p class="lede">Every keep-awake tool on the Mac fights idle sleep. None of them survive the
+    lid closing. Liddy is a guarded wrapper around the one setting that does &mdash; owned by a root
+    daemon on a deadman switch, released the moment the work is done.</p>
+
+    <ul class="tag">
+      <li>MIT</li><li>no account</li><li>no telemetry</li><li>macOS 14+</li>
+    </ul>
+
+    <div class="cta">
+      <a class="button button-solid" href="#install">Install Liddy</a>
+      <a class="button" href="https://github.com/bygelo/liddy">Read the source</a>
+    </div>
+  </div>
+
+  <!-- ─────────── signature: the deadman, playable ─────────── -->
+  <div class="rig-stage">
+    <svg class="rig" id="rig" viewBox="0 0 400 360" role="img" aria-labelledby="rig-title">
+      <title id="rig-title">A Mac holding the sleep setting open on a five-second heartbeat</title>
+      <defs>
+        <radialGradient id="halo" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stop-color="var(--glow)" stop-opacity=".30"/>
+          <stop offset="72%" stop-color="var(--glow)" stop-opacity="0"/>
+        </radialGradient>
+        <linearGradient id="slab" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#465956"/>
+          <stop offset="55%" stop-color="#2A3735"/>
+          <stop offset="100%" stop-color="#161E1D"/>
+        </linearGradient>
+      </defs>
+
+      <circle class="rig-halo" cx="200" cy="132" r="132" fill="url(#halo)"/>
+
+      <!-- the heartbeat, at the app's real 5s interval -->
+      <circle class="rig-track" cx="200" cy="132" r="94" fill="none" stroke="var(--hair-lit)" stroke-width="2"/>
+      <circle class="rig-beat" id="rig-beat" cx="200" cy="132" r="94" fill="none"
+              stroke="var(--glow)" stroke-width="3" stroke-linecap="round"
+              transform="rotate(-90 200 132)"/>
+
+      <text class="rig-value" id="rig-value" x="200" y="126" text-anchor="middle">1</text>
+      <text class="rig-key" x="200" y="152" text-anchor="middle">disablesleep</text>
+
+      <!-- The Mac, side elevation. The lid stays shut in every state: reverting
+           does not open the Mac, it lets the closed lid put it to sleep. -->
+      <g class="rig-mac">
+        <ellipse class="rig-shade" cx="200" cy="288" rx="98" ry="7"/>
+        <rect class="rig-base" x="128" y="268" width="144" height="12" rx="4" fill="url(#slab)"/>
+        <rect class="rig-lid" x="130" y="254" width="140" height="12" rx="4" fill="url(#slab)"/>
+        <rect class="rig-seam" x="132" y="255" width="136" height="1"/>
+        <rect class="rig-notch" x="186" y="278" width="28" height="2" rx="1"/>
+        <circle class="rig-led" cx="200" cy="273" r="2.6"/>
+      </g>
+
+      <text class="rig-state" id="rig-state" x="200" y="330" text-anchor="middle">HOLDING · LID CLOSED</text>
+    </svg>
+
+    <div class="rig-panel">
+      <p class="rig-caption">Kill it and watch. The setting goes back &mdash; that revert is the whole
+      difference between Liddy and a raw <code>pmset</code>.</p>
+
+      <div class="rig-control">
+        <button class="button button-danger" id="act-kill" type="button">kill&nbsp;-9 Liddy</button>
+        <button class="button button-ghost" id="act-hang" type="button">or hang the app instead</button>
+        <button class="button is-hidden" id="act-reset" type="button">restart Liddy</button>
+      </div>
+
+      <pre class="term term-log" id="deadman-log" aria-live="polite"><code><span class="ts">23:41:02</span> app connected · heartbeat every 5s
+<span class="ts">23:41:02</span> helper: <span class="ok">pmset -a disablesleep 1</span></code></pre>
+    </div>
+  </div>
+
+  <div class="hero-foot">
+    <pre class="term term-hero"><code><span class="c">liddy claim "overnight migration" --ttl 300</span>   <span class="d"># declare live work</span>
+<span class="c">liddy lid on --timer 8h</span>                       <span class="d"># close the lid and walk away</span>
+<span class="c">liddy log</span>                                     <span class="d"># in the morning: why it stopped</span></code></pre>
+    <p class="footnote">Both paths above are real, and both run at the product's own timings &mdash; the
+    disconnect reverts immediately, the heartbeat gap takes the full 15&nbsp;seconds. Two more paths
+    exist that are awkward to click: <code>SIGTERM</code>, and the helper's own startup, which reverts
+    the setting if it finds it left on.</p>
+  </div>
+</header>
+
+<!-- ───────────────────────── two sleeps ───────────────────────── -->
+<section class="section" id="lever">
+  <p class="stamp">23:41 &middot; why nothing else does this</p>
+  <h2 class="head">macOS has two sleeps. Most tools only fight one.</h2>
+
+  <div class="grid-2">
+    <article class="card">
+      <p class="card-kind">Idle sleep</p>
+      <p class="card-trigger">triggered by inactivity</p>
+      <p class="prose">Stopped by a power assertion &mdash; <code>IOPMAssertionCreateWithName</code>.
+      This is what <code>caffeinate</code> and every menu-bar keep-awake app uses. It works, and it
+      is not the problem.</p>
+    </article>
+    <article class="card card-lit">
+      <p class="card-kind">Clamshell sleep</p>
+      <p class="card-trigger">triggered the instant the lid closes</p>
+      <p class="prose"><strong>No power assertion can stop it.</strong> There are exactly two public
+      ways through: attach an external display on AC power, or set <code>disablesleep</code>. No third
+      lever, no kernel extension, no private API.</p>
+    </article>
+  </div>
+
+  <div class="alarm">
+    <p class="alarm-label">the one lever</p>
+    <p class="alarm-code">sudo pmset -a disablesleep 1</p>
+    <p class="alarm-note">Global. Sticky. Root-only. No indicator anywhere on screen, and a reboot
+    does not reliably clear it. <strong>That risk is the product.</strong> Everything Liddy does is
+    built to make this line safe to run and impossible to forget.</p>
+  </div>
+</section>
+
+<!-- ───────────────────────── the guard ───────────────────────── -->
+<section class="section">
+  <p class="stamp">23:42 &middot; four independent ways back</p>
+  <h2 class="head">A guard, not a wrapper.</h2>
+  <p class="prose prose-wide">The setting is written by a root launchd daemon, never by the app.
+  While it is on, the app must hold a socket open and heartbeat every five seconds. The helper
+  reverts on any one of these &mdash; and reverting only on next launch, which is what comparable
+  tools do, leaves a wedged Mac unable to sleep for however long it takes you to notice.</p>
+
+  <ol class="revert">
+    <li><span class="revert-when">the app disconnects</span><span class="revert-how">crash, force-quit, <code>kill -9</code> &mdash; immediately</span></li>
+    <li><span class="revert-when">15s without a heartbeat</span><span class="revert-how">the app is hung or wedged</span></li>
+    <li><span class="revert-when">SIGTERM / SIGINT</span><span class="revert-how">shutdown, logout, an uninstall script</span></li>
+    <li><span class="revert-when">the helper's own startup</span><span class="revert-how">it finds the setting left on and clears it</span></li>
+  </ol>
+
+  <div class="proof">
+    <div>
+      <h3 class="proof-head">Don't take the claim on trust.</h3>
+      <p class="prose">The script enables closed-lid mode, confirms <code>disablesleep</code> is <code>1</code>,
+      <code>kill -9</code>s the app, and watches for the setting to come back. If it does not pass,
+      closed-lid mode is not safe to use overnight &mdash; that revert is the entire difference between
+      Liddy and a raw <code>pmset</code>.</p>
+    </div>
+    <pre class="term"><code><span class="c">./Script/verify-deadman.sh</span>
+<span class="d">enabling closed-lid mode…</span>
+<span class="ok">✓</span> disablesleep = 1
+<span class="d">kill -9 &lt;app pid&gt;</span>
+<span class="ok">✓</span> disablesleep = 0 <span class="d">after 0.4s</span>
+<span class="ok">PASS</span> <span class="d">— deadman switch verified</span></code></pre>
+  </div>
+</section>
+
+<!-- ───────────────────────── the lease ───────────────────────── -->
+<section class="section" id="lease">
+  <p class="stamp">00:02 &middot; the differentiator</p>
+  <h2 class="head">The work declares itself. Nothing has to guess.</h2>
+  <p class="prose prose-wide">Name-matching a process is a guess. Liddy would rather the work say
+  out loud that it is working, and say for how long &mdash; a lease has a TTL, so a claimer that dies
+  stops holding the Mac on its own. Nothing has to notice it crashed.</p>
+
+  <pre class="term"><code><span class="c">TOKEN=$(liddy claim "fine-tune run" --ttl 300)</span>
+<span class="c">trap 'liddy release $TOKEN' EXIT</span>
+<span class="c">./train.sh</span></code></pre>
+
+  <div class="grid-2 grid-2-tight">
+    <article class="card">
+      <p class="card-kind">Claude Code, hooked</p>
+      <p class="prose">One command wires Liddy to the hooks, and the Mac is held
+      <em>exactly while a turn is running</em>.</p>
+      <pre class="term term-flat"><code><span class="c">liddy hook install</span></code></pre>
+      <table class="mini">
+        <tr><td><code>UserPromptSubmit</code></td><td>claim, keyed by <code>session_id</code></td></tr>
+        <tr><td><code>Stop</code></td><td>release</td></tr>
+        <tr><td><code>SessionEnd</code></td><td>release (backstop)</td></tr>
+      </table>
+      <p class="footnote">Hooking <code>SessionStart</code> instead is the obvious choice and it is
+      wrong: a session left open in a terminal overnight would hold the Mac awake with nothing
+      running.</p>
+    </article>
+
+    <article class="card">
+      <p class="card-kind">And when nothing claims</p>
+      <p class="prose">Auto-watch is the fallback, and it treats a matched process as working
+      <strong>by existing, never by CPU</strong> &mdash; an agent sits near 0% waiting on an API between
+      tool calls, so a CPU threshold would drop the Mac mid-task.</p>
+      <p class="prose">It matches the executable basename exactly, not a substring of the path.
+      Otherwise <code>rsync</code> matches macOS's own <code>appplaceholde<b>rsync</b>d</code>,
+      <code>uv</code> matches <code>UVCAssistant</code>, and <code>docker</code> matches the
+      always-running <code>com.docker.vmnetd</code>. Any one of those holds an idle Mac awake
+      forever. It is locked down in a test.</p>
+    </article>
+  </div>
+
+  <div class="agents">
+    <p class="agents-caption">One row per agent, with two signals that are deliberately not collapsed
+    into one: whether it is <em>working</em>, and whether its <em>API answers</em>. An agent burning
+    battery against a down API is the case worth waking up for.</p>
+    <pre class="term term-panel"><code><span class="d">AGENTS                                    1 working</span>
+<span class="lit">✦ Claude</span>        working ×2      <span class="ok">●</span> API ok · 110ms
+<span class="d">⌗ Antigravity   idle            ○ not checked</span>
+<span class="d">◇ Codex         idle            ○ not checked</span></code></pre>
+  </div>
+</section>
+
+<!-- ───────────────────────── the governor ───────────────────────── -->
+<section class="section" id="governor">
+  <p class="stamp">02:14 &middot; battery 34%, falling</p>
+  <h2 class="head">The rules that end a run are testable, not inferred.</h2>
+  <p class="prose prose-wide">Readings in, verdict out, no side effects. The governor is a pure
+  function, so the rules deciding whether an overnight run survives can be tested directly rather
+  than guessed at from the app looking plausible.</p>
+
+  <table class="rules">
+    <thead><tr><th>Rule</th><th>Default</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr class="rule-hard"><td>Hard battery floor</td><td>4%</td><td><code>pmset sleepnow</code> &mdash; must beat <em>every</em> assertion, not just ours</td></tr>
+      <tr class="rule-hard"><td>Critical thermal, lid shut</td><td>&mdash;</td><td>force sleep; with no airflow, releasing is not enough</td></tr>
+      <tr class="rule-soft"><td>Soft battery floor</td><td>20%</td><td>release, and sleep normally with headroom to resume</td></tr>
+      <tr class="rule-soft"><td>Thermal ceiling</td><td>critical</td><td>release</td></tr>
+      <tr><td>Charging-only</td><td>off</td><td>release the moment it comes off mains</td></tr>
+    </tbody>
+  </table>
+
+  <p class="pull">Both floors are on for everyone.<br><em>A guardrail behind a paywall is not a guardrail.</em></p>
+
+  <div class="grid-2 grid-2-tight">
+    <article class="card">
+      <p class="card-kind">A safety stop stays stopped</p>
+      <p class="prose">Releasing the Mac does not stop the work &mdash; <code>claude</code> and
+      <code>cargo</code> are still running, so the very next scan wants to hold again. Left alone
+      that turns a battery floor into a ten-second flap. So a governor stop also <em>blocks</em>
+      re-arming, and the block lifts only when the governor is fully satisfied: a release at 20%
+      re-arms at 30%, or on mains power.</p>
+    </article>
+    <article class="card">
+      <p class="card-kind">Off stays off</p>
+      <p class="prose">Turning the hold off by hand pauses auto-watch too. Without that, "off" is
+      meaningless in the only situation you would use it &mdash; the watched processes are still
+      running, which is <em>why</em> the Mac was awake, so the switch would flip itself back on while
+      you are looking at it. The panel says <strong>Paused by you</strong>, and names what it is now
+      ignoring.</p>
+    </article>
+  </div>
+</section>
+
+<!-- ───────────────────────── compare ───────────────────────── -->
+<section class="section" id="compare">
+  <p class="stamp">02:15 &middot; the neighbours</p>
+  <h2 class="head">Four tools flip the same flag. This is what differs.</h2>
+
+  <div class="scroller">
+  <table class="compare">
+    <thead>
+      <tr>
+        <th></th>
+        <th class="is-us">Liddy</th>
+        <th>LidRun</th>
+        <th>Lidless</th>
+        <th><code>caffeinate</code></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><th>Survives a lid close</th><td class="is-us"><span class="y">yes</span></td><td><span class="y">yes</span></td><td><span class="y">yes</span></td><td><span class="n">no</span></td></tr>
+      <tr><th>Source available</th><td class="is-us"><span class="y">MIT</span></td><td><span class="n">closed</span></td><td><span class="y">MIT</span></td><td><span class="y">Apple</span></td></tr>
+      <tr><th>Price</th><td class="is-us"><span class="y">free</span></td><td>$9&ndash;$59</td><td><span class="y">free</span></td><td><span class="y">free</span></td></tr>
+      <tr><th>Battery &amp; thermal floors</th><td class="is-us"><span class="y">yes</span></td><td><span class="y">yes</span></td><td><span class="n">none</span></td><td><span class="n">none</span></td></tr>
+      <tr><th>Reverts if the app is killed</th><td class="is-us"><span class="y">4 paths</span></td><td class="q">unpublished</td><td class="q">on next launch</td><td><span class="y">n/a</span></td></tr>
+      <tr><th>A script you can run to prove it</th><td class="is-us"><span class="y">verify-deadman.sh</span></td><td><span class="n">no</span></td><td><span class="n">no</span></td><td><span class="n">n/a</span></td></tr>
+      <tr><th>Lease API the work can call</th><td class="is-us"><span class="y">claim / renew / release</span></td><td><span class="n">no</span></td><td><span class="n">no</span></td><td><span class="n">no</span></td></tr>
+      <tr><th>Agent-aware hooks</th><td class="is-us"><span class="y">Claude Code</span></td><td class="q">process match</td><td><span class="n">no</span></td><td><span class="n">no</span></td></tr>
+      <tr><th>Notarised build</th><td class="is-us"><span class="n">not yet</span></td><td><span class="y">yes</span></td><td class="q">&mdash;</td><td><span class="y">built in</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p class="footnote footnote-wide">Compiled from each project's own published material in July 2026,
+  and it will drift &mdash; <a href="https://github.com/bygelo/liddy/issues/new?title=Comparison%20table%20is%20wrong">tell
+  us where this table is unfair</a> and it gets fixed. LidRun is a good product that solves the same
+  problem and got there first; the honest last row is ours to fix, not theirs. Lidless is MIT and
+  free with the same architecture, which is why price is not the argument on this page.</p>
+</section>
+
+<!-- ───────────────────────── limits ───────────────────────── -->
+<section class="section" id="limits">
+  <p class="stamp">03:50 &middot; thermal state: very hot</p>
+  <h2 class="head">What Liddy cannot do.</h2>
+
+  <div class="limit">
+    <p class="limit-lead">A closed lid cuts off the main airflow path. Hard ventilated surface,
+    on mains power. <strong>Never a bag, a bed, or a drawer.</strong></p>
+    <ul class="limit-list">
+      <li><b>It cannot stop your Mac getting hot.</b> It reads the thermal state macOS reports and backs
+      off. It does not control fans &mdash; third-party fan control is restricted on Apple silicon, and
+      reading SMC temperature directly misfires.</li>
+      <li><b>Releases are ad-hoc signed, not notarised</b> &mdash; that needs a paid Apple Developer
+      account. Gatekeeper refuses to launch until you clear the quarantine flag by hand, and macOS
+      treats every update as a new app.</li>
+      <li><b>The health panel is not a system monitor.</b> No CPU graph, no memory breakdown, no
+      throughput. Everything on it is a quantity that can end a hold; Activity Monitor already draws
+      the rest.</li>
+      <li><b>v0 builds in Swift 5 language mode.</b> Full Swift 6 sendability annotation is a
+      follow-up, not a shipped claim.</li>
+    </ul>
+    <p class="limit-foot">This list lives on the landing page on purpose. It is in the README too,
+    and the roadmap keeps a public file of the ideas that were considered and <em>rejected</em>, with
+    the reason.</p>
+  </div>
+</section>
+
+<!-- ───────────────────────── install ───────────────────────── -->
+<section class="section" id="install">
+  <p class="stamp">06:12 &middot; the run finished at 05:58</p>
+  <h2 class="head">In the morning, it tells you why it stopped.</h2>
+
+  <pre class="term term-panel"><code><span class="c">liddy log</span>
+<span class="d">23:41  hold acquired    lid closed · timer 8h</span>
+<span class="d">00:02  lease            claude · session 4f2a · renewed ×38</span>
+<span class="ts">02:14</span>  <span class="warn">soft floor</span>       battery 20% · released, slept with headroom
+<span class="d">05:58  finished         last lease gone · smart release</span>
+<span class="ok">06:12</span>  ended            <span class="ok">finished</span> — not battery, not thermal, not a timer</code></pre>
+
+  <div class="install">
+    <div class="install-step">
+      <p class="install-num">Download</p>
+      <p class="prose">Grab the latest zip from Releases and drag <code>Liddy.app</code> to
+      <code>/Applications</code>.</p>
+      <pre class="term term-flat"><code><span class="c">xattr -dr com.apple.quarantine /Applications/Liddy.app</span>
+<span class="c">open /Applications/Liddy.app</span></code></pre>
+      <p class="footnote">That first line is not optional, and the reason is in
+      <a href="#limits">the limits</a>.</p>
+    </div>
+    <div class="install-step">
+      <p class="install-num">Or build it</p>
+      <p class="prose">Swift toolchain, no external dependency, nothing to sign up for.</p>
+      <pre class="term term-flat"><code><span class="c">git clone https://github.com/bygelo/liddy</span>
+<span class="c">./Script/build-app.sh</span>    <span class="d"># → /Applications/Liddy.app</span></code></pre>
+      <p class="footnote">Building with a Developer ID identity on the machine skips the quarantine
+      dance entirely.</p>
+    </div>
+  </div>
+
+  <p class="prose prose-wide">Keep-awake, timers, charging-only, both battery floors and thermal
+  watch all work <strong>without</strong> the helper. The root daemon is required only to close the
+  lid, and the app installs it from the menu with one authorisation prompt &mdash; no Terminal step.</p>
+
+  <div class="cta cta-center">
+    <a class="button button-solid" href="https://github.com/bygelo/liddy/releases">Download the latest release</a>
+    <a class="button" href="https://github.com/bygelo/liddy">github.com/bygelo/liddy</a>
+  </div>
+</section>
+
+<!-- ───────────────────────── contribute ───────────────────────── -->
+<section class="section section-build" id="build">
+  <p class="stamp">the part that needs you</p>
+  <h2 class="head">The roadmap is public, and every row is falsifiable.</h2>
+  <p class="prose prose-wide">Liddy is a small tree with no external dependencies:
+  <code>swift build &amp;&amp; swift test</code> runs 168 tests and that is the whole gate. Every open
+  roadmap row names a <strong>surface</strong> (the thing that will exist) and a
+  <strong>benchmark</strong> (how you would know it worked), so a contribution has a finish line
+  before it has a first line. Gaps are written down as gaps, not opportunities.</p>
+
+  <div class="job">
+    <article class="job-card">
+      <p class="job-size">one entry</p>
+      <h3 class="job-head">Teach it a new agent</h3>
+      <p class="prose">Adding an agent to the panel is a label, a URL, and the lease-label fragments
+      that identify it. Matching is case-insensitive substring against active leases, so it catches
+      both an explicit <code>claim</code> and a process picked up by auto-watch.</p>
+      <pre class="term term-flat"><code><span class="d">// ServiceEndpoint.known</span>
+.init(label: <span class="s">"Windsurf"</span>,
+      url: <span class="s">"https://api.windsurf.com"</span>,
+      leaseFragment: [<span class="s">"windsurf"</span>, <span class="s">"cascade"</span>])</code></pre>
+    </article>
+
+    <article class="job-card">
+      <p class="job-size">open, and load-bearing</p>
+      <h3 class="job-head">Hooks beyond Claude Code</h3>
+      <p class="prose">Cursor, Codex and Amp only get process-matching today &mdash; the guess this
+      project argues against everywhere else. The benchmark is written already: install the hook,
+      drive one turn, and a keyed lease has to appear during it and be gone within the TTL after.</p>
+      <p class="job-file"><code>Sources/LiddyKit/Work/Hook.swift</code></p>
+    </article>
+
+    <article class="job-card">
+      <p class="job-size">open, and the honest one</p>
+      <h3 class="job-head">Wrapped commands get no floors</h3>
+      <p class="prose">When the app is not running, <code>liddy -- &lt;cmd&gt;</code> falls back to a
+      bare assertion with no battery or thermal floor, and only warns on stderr. The safety table
+      implies those floors are unconditional. Right now they are not.</p>
+      <p class="job-file"><code>Sources/LiddyCli/main.swift</code></p>
+    </article>
+
+    <article class="job-card">
+      <p class="job-size">the contract</p>
+      <h3 class="job-head">Document the lease protocol</h3>
+      <p class="prose"><code>claim</code>, <code>renew</code> and <code>release</code> are real and
+      keyed, but undocumented outside <code>--help</code>, so nobody can integrate without reading
+      Swift. This is the one thing here that the alternatives do not have, and it is currently an
+      internal detail of one binary. It passes when a fresh reader can claim and release from
+      <code>nc</code> without opening a <code>.swift</code> file.</p>
+    </article>
+  </div>
+
+  <div class="cta">
+    <a class="button button-solid" href="https://github.com/bygelo/liddy/issues">Open issues</a>
+    <a class="button" href="https://github.com/bygelo/liddy/blob/main/ROADMAP.md">Read the roadmap</a>
+    <a class="button" href="https://github.com/bygelo/liddy/blob/main/docs/roadmap-rejected.md">See what was rejected</a>
+  </div>
+</section>
+
+<!-- ───────────────────────── support ───────────────────────── -->
+<section class="section section-support" id="support">
+  <div class="support">
+    <p class="stamp">on money</p>
+    <h2 class="head head-small">Free, and staying free &mdash; every guardrail included.</h2>
+    <p class="prose">There is no licence check, no account, no telemetry, and no tier where the
+    battery floor is the thing you unlock. Lidless is MIT and free with the same architecture;
+    there is no price below free, so price was never the argument.</p>
+    <p class="prose">If Liddy saved an overnight run, sponsorship funds the boring things that cost
+    real money &mdash; the Apple Developer account that gets releases notarised, so the next person
+    does not have to clear a quarantine flag by hand. Companies whose agent fleets depend on it can
+    put their name in the README.</p>
+    <div class="cta">
+      <a class="button button-solid" href="https://github.com/sponsors/bygelo">Sponsor on GitHub</a>
+      <a class="button" href="https://github.com/bygelo/liddy/blob/main/ROADMAP.md">What it would pay for</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="foot-mark">
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="1" y="1" width="22" height="22" rx="5" fill="var(--teal)"/><path d="M6.5 8.5h11v6h-11z" fill="none" stroke="#fff" stroke-width="1.3" stroke-linejoin="round"/><path d="M5 16.5h14" stroke="#fff" stroke-width="1.3" stroke-linecap="round"/></svg>
+    <span>Liddy</span>
+  </div>
+  <p class="foot-line">Closed-lid keep-awake for macOS. MIT licensed.
+  Built by <a href="https://bygelo.com">bygelo</a>.</p>
+  <p class="foot-warn">Hard ventilated surface, on mains power. Never a bag, a bed, or a drawer.</p>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

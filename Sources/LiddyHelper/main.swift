@@ -23,137 +23,32 @@ let version = LiddyVersion.current
 /// Three missed heartbeats at the app's 5s interval.
 let deadmanSecond = 15
 
-// MARK: - State, persisted so a helper restart can tell our toggle from the user's
-
-struct HelperState: Codable {
-    var isClamshellOn: Bool
-    var setAt: Date
-}
-
-let stateUrl = URL(fileURLWithPath: LiddyPath.helperStatePath)
-
-func loadState() -> HelperState? {
-    guard let data = try? Data(contentsOf: stateUrl) else { return nil }
-    return try? Wire.decoder.decode(HelperState.self, from: data)
-}
-
-func saveState(_ state: HelperState?) {
-    let directory = stateUrl.deletingLastPathComponent()
-    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    guard let state else {
-        try? FileManager.default.removeItem(at: stateUrl)
-        return
-    }
-    guard let data = try? Wire.encoder.encode(state) else { return }
-    try? data.write(to: stateUrl, options: .atomic)
-}
-
-// MARK: - pmset
-
-@discardableResult
-func runPmset(_ argument: [String]) -> Bool {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
-    process.arguments = argument
-    process.standardOutput = FileHandle.nullDevice
-    process.standardError = FileHandle.nullDevice
-    do {
-        try process.run()
-        process.waitUntilExit()
-        return process.terminationStatus == 0
-    } catch {
-        return false
-    }
-}
+// MARK: - Wiring
+//
+// The state store, the `pmset` runner and `ClamshellGuard` itself all live in
+// `LiddyKit` now. They used to live in this file, where no test could import them —
+// which is exactly how the "any disconnect reverts the toggle" bug shipped and how
+// `liddy doctor` ended up disarming the thing it was diagnosing.
 
 func log(_ message: String) {
     FileHandle.standardError.write(Data("[liddy-helper] \(message)\n".utf8))
 }
 
-// MARK: - The toggle, with its deadman switch
+let pmset = LivePmsetRunner()
+let store = FileClamshellStateStore()
 
-final class ClamshellGuard {
-    private let lock = NSLock()
-    private let queue = DispatchQueue(label: "com.liddy.helper.deadman")
-    private var deadman: DispatchWorkItem?
-
-    private(set) var isOn = false
-    private(set) var lastHeartbeatAt: Date?
-
-    /// Called at startup: if we left `disablesleep` on, put it back. This is the
-    /// recovery path for the case where even the helper died.
-    func reconcileOnLaunch() {
-        guard let state = loadState(), state.isClamshellOn else { return }
-        log("found leftover disablesleep from \(state.setAt), reverting")
-        _ = runPmset(["-a", "disablesleep", "0"])
-        saveState(nil)
-    }
-
-    @discardableResult
-    func set(_ wanted: Bool) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return setLocked(wanted)
-    }
-
-    private func setLocked(_ wanted: Bool) -> Bool {
-        guard runPmset(["-a", "disablesleep", wanted ? "1" : "0"]) else {
-            log("pmset disablesleep \(wanted ? 1 : 0) FAILED")
-            return false
-        }
-        isOn = wanted
-        saveState(wanted ? HelperState(isClamshellOn: true, setAt: Date()) : nil)
-        log("disablesleep \(wanted ? 1 : 0)")
-        if wanted {
-            lastHeartbeatAt = Date()
-            armDeadman()
-        } else {
-            disarmDeadman()
-            lastHeartbeatAt = nil
-        }
-        return true
-    }
-
-    func heartbeat() {
-        lock.lock()
-        defer { lock.unlock() }
-        guard isOn else { return }
-        lastHeartbeatAt = Date()
-        armDeadman()
-    }
-
-    /// The app's socket closed. No grace period: a closed connection is unambiguous.
-    func connectionLost() {
-        lock.lock()
-        defer { lock.unlock() }
-        guard isOn else { return }
-        log("client disconnected while disablesleep was on, reverting now")
-        _ = setLocked(false)
-    }
-
-    private func armDeadman() {
-        deadman?.cancel()
-        let item = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.lock.lock()
-            defer { self.lock.unlock() }
-            guard self.isOn else { return }
-            log("no heartbeat for \(deadmanSecond)s, reverting disablesleep")
-            _ = self.setLocked(false)
-        }
-        deadman = item
-        queue.asyncAfter(deadline: .now() + .seconds(deadmanSecond), execute: item)
-    }
-
-    private func disarmDeadman() {
-        deadman?.cancel()
-        deadman = nil
-    }
-}
+@discardableResult
+func runPmset(_ argument: [String]) -> Bool { pmset.run(argument) }
 
 // MARK: - Entry
 
-let guardian = ClamshellGuard()
+let guardian = ClamshellGuard(
+    pmset: pmset,
+    store: store,
+    scheduler: QueueDelayScheduler(),
+    deadmanSecond: deadmanSecond,
+    log: log
+)
 
 guard getuid() == 0 else {
     log("must run as root (installed as a launchd daemon)")
@@ -174,8 +69,8 @@ guardian.reconcileOnLaunch()
 
 let server = LineSocketServer(
     path: LiddyPath.helperSocketPath,
-    onClose: { guardian.connectionLost() }
-) { line in
+    onClose: { connection in guardian.connectionLost(connection) }
+) { line, connection in
     let request: HelperRequest
     do {
         request = try Wire.decode(HelperRequest.self, from: line)
@@ -186,10 +81,10 @@ let server = LineSocketServer(
     let response: HelperResponse
     switch request {
     case .setClamshell(let isOn):
-        response = guardian.set(isOn) ? .ok : .failed("pmset failed")
+        response = guardian.set(isOn, owner: connection) ? .ok : .failed("pmset failed")
 
     case .heartbeat:
-        guardian.heartbeat()
+        guardian.heartbeat(from: connection)
         response = .ok
 
     case .sleepNow(let reason):
@@ -201,7 +96,7 @@ let server = LineSocketServer(
     case .status:
         response = .status(HelperStatus(
             isClamshellOn: guardian.isOn,
-            isOwnedByLiddy: loadState()?.isClamshellOn ?? false,
+            isOwnedByLiddy: store.load()?.isClamshellOn ?? false,
             secondSinceHeartbeat: guardian.lastHeartbeatAt.map { Int(Date().timeIntervalSince($0)) },
             version: version
         ))

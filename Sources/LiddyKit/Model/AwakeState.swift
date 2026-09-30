@@ -19,6 +19,7 @@ public enum StopReason: String, Codable, Sendable {
     case appQuit
     /// The helper's deadman switch fired: the app stopped heartbeating.
     case heartbeatLost
+    case chargingOnly
 
     public var summary: String {
         switch self {
@@ -29,6 +30,7 @@ public enum StopReason: String, Codable, Sendable {
         case .userStopped:      return "Stopped by you"
         case .appQuit:          return "Liddy quit"
         case .heartbeatLost:    return "Heartbeat lost, reverted by helper"
+        case .chargingOnly:     return "Unplugged in charging-only mode"
         }
     }
 }
@@ -59,6 +61,19 @@ public struct RuntimeSnapshot: Codable, Sendable {
     public var isUserPaused: Bool
     /// When "keep going anyway" lapses. nil when no override is running.
     public var overrideUntil: Date?
+    /// The heaviest few apps right now, already collapsed per app. Visibility only —
+    /// nothing in the governor reads this, deliberately (see `ProcessLoad`).
+    public var topLoad: [ProcessLoad]
+    /// Apps the resource saver is currently holding in the background, so the panel can
+    /// say what it took rather than leaving the user to notice.
+    public var backgroundedApp: [String]
+    /// The backlight level the dimmer will restore when the lid opens, nil when it is
+    /// not holding the panel down.
+    public var dimmedFrom: Double?
+    /// Whole-machine CPU, 0-100. Display only, like the temperature.
+    public var cpuPercent: Double?
+    /// Live CLI agent sessions — Tab Warden. Ordered working-first by `SessionScanner`.
+    public var session: [AgentSession]
 
     public init(
         isAwakeHeld: Bool = false,
@@ -75,8 +90,18 @@ public struct RuntimeSnapshot: Codable, Sendable {
         blockedBy: StopReason? = nil,
         isAutoWatchOn: Bool = true,
         isUserPaused: Bool = false,
-        overrideUntil: Date? = nil
+        overrideUntil: Date? = nil,
+        topLoad: [ProcessLoad] = [],
+        backgroundedApp: [String] = [],
+        dimmedFrom: Double? = nil,
+        session: [AgentSession] = [],
+        cpuPercent: Double? = nil
     ) {
+        self.session = session
+        self.cpuPercent = cpuPercent
+        self.topLoad = topLoad
+        self.backgroundedApp = backgroundedApp
+        self.dimmedFrom = dimmedFrom
         self.isAwakeHeld = isAwakeHeld
         self.isAssertionActive = isAssertionActive
         self.isClamshellActive = isClamshellActive

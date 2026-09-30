@@ -87,7 +87,7 @@ final class SafetyGovernorTest: XCTestCase {
             thermal: ThermalReading(level: .nominal),
             isClamshellActive: false
         )
-        XCTAssertEqual(verdict, .release(.userStopped))
+        XCTAssertEqual(verdict, .release(.chargingOnly))
     }
 
     /// A hand-edited config must not be able to disable a floor by inverting it.

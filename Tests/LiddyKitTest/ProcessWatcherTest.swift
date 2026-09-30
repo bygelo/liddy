@@ -16,6 +16,28 @@ final class ProcessWatcherTest: XCTestCase {
         XCTAssertEqual(name("python"), "python")
     }
 
+    /// Real rows from `ps -Ao comm=` on macOS 15. An absolute path keeps its spaces;
+    /// a bare command still gets its argument stripped. Getting this wrong reduced
+    /// "Visual Studio Code" to `visual`, and the watch silently never fired.
+    func testExecutableNameKeepsSpacedPathsIntact() {
+        XCTAssertEqual(name("/Applications/Visual Studio Code.app/Contents/MacOS/Electron"), "electron")
+        XCTAssertEqual(name("/Applications/My App.app/Contents/MacOS/My App"), "my app")
+        XCTAssertEqual(name("/System/Library/CoreServices/Software Update.app/Contents/Resources/softwareupdated"), "softwareupdated")
+        XCTAssertEqual(name("/usr/bin/python3"), "python3")
+        XCTAssertEqual(name("npm"), "npm")
+        XCTAssertEqual(name("  /Applications/My App.app/Contents/MacOS/My App  "), "my app")
+    }
+
+    /// A spaced path is watchable end to end, which is the whole point of the row.
+    func testSpacedPathStillMatchesItsPattern() {
+        XCTAssertTrue(ProcessWatcher.matches(
+            executableName: name("/Applications/Visual Studio Code.app/Contents/MacOS/Electron"),
+            pattern: "electron"))
+        XCTAssertTrue(ProcessWatcher.matches(
+            executableName: name("/Users/me/Library/Application Support/Figma/FigmaAgent.app/Contents/MacOS/figma_agent"),
+            pattern: "figma_agent"))
+    }
+
     func testSystemDaemonNoLongerMatchesAnUnrelatedPattern() {
         // "appplaceholdersyncd" literally contains "rsync".
         XCTAssertFalse(ProcessWatcher.matches(

@@ -129,4 +129,21 @@ codesign --force --sign "$SIGN" "$APP/Contents/Helpers/liddy" 2>/dev/null || ech
 codesign --force --sign "$SIGN" "$APP" 2>/dev/null || echo "!! codesign skipped"
 
 echo "==> built $APP"
-echo "    open $APP"
+
+# Local builds land in /Applications so Spotlight, Login Items, and a reboot can
+# still find Liddy. The app is LSUIElement — no Dock icon — so a copy left in
+# dist/ works until you log out, and then it is gone. CI only needs dist/ for
+# the zip (GitHub sets CI=true); SKIP_INSTALL=1 does the same by hand.
+if [[ "${SKIP_INSTALL:-}" != "1" && "${CI:-}" != "true" ]]; then
+  echo "==> installing /Applications/Liddy.app"
+  ditto "$APP" /Applications/Liddy.app
+  mkdir -p "$HOME/.local/bin"
+  ln -sf /Applications/Liddy.app/Contents/Helpers/liddy "$HOME/.local/bin/liddy"
+  echo "    open /Applications/Liddy.app"
+  echo "    CLI → $HOME/.local/bin/liddy"
+  if pgrep -x Liddy >/dev/null; then
+    echo "    Liddy is running — relaunch it to pick up this build (an overnight hold is left alone)"
+  fi
+else
+  echo "    open $APP"
+fi

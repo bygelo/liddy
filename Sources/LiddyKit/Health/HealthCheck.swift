@@ -85,6 +85,42 @@ public enum HealthGroup: String, Codable, Sendable, CaseIterable {
 
 /// One answered question. `id` is stable across probe cycles so SwiftUI can animate a
 /// row changing state instead of tearing the list down and rebuilding it.
+/// A failing check's way out.
+///
+/// A diagnosis with no next step leaves the user stuck: the panel says "not in
+/// /Applications" and the only way forward is to know what that means. Every remedy
+/// here is one click that either fixes the thing or opens the exact place it is fixed —
+/// never a dead end, and never a shell command the user has to retype.
+public enum HealthRemedy: String, Codable, Sendable {
+    /// Install the bundled root helper via the system authorisation prompt.
+    case installHelper
+    /// Reveal Liddy.app so it can be dragged to /Applications.
+    case revealApp
+    /// Open System Settings at Login Items.
+    case openLoginItem
+    /// Write the Claude Code hook.
+    case installHook
+    /// Clear a `disablesleep` nothing is watching.
+    case clearDisableSleep
+    /// Re-run every check now.
+    case refresh
+    /// The provider's own status page.
+    case openStatusPage
+
+    /// The button's label. A verb, so the row reads "Install…" rather than "Helper".
+    public var title: String {
+        switch self {
+        case .installHelper:     return "Install…"
+        case .revealApp:         return "Show in Finder"
+        case .openLoginItem:     return "Open Settings"
+        case .installHook:       return "Install hook"
+        case .clearDisableSleep: return "Clear it"
+        case .refresh:           return "Re-check"
+        case .openStatusPage:    return "Status page"
+        }
+    }
+}
+
 public struct HealthCheck: Codable, Sendable, Equatable, Identifiable {
     public var id: String
     public var group: HealthGroup
@@ -93,6 +129,9 @@ public struct HealthCheck: Codable, Sendable, Equatable, Identifiable {
     public var detail: String
     /// Round-trip time for checks that make a request. nil for local ones.
     public var latencyMillisecond: Int?
+    /// What to offer when this check is not green. nil when there is genuinely nothing
+    /// the app can do, which is rarer than it looks.
+    public var remedy: HealthRemedy?
 
     public init(
         id: String,
@@ -100,8 +139,10 @@ public struct HealthCheck: Codable, Sendable, Equatable, Identifiable {
         label: String,
         state: HealthState,
         detail: String,
-        latencyMillisecond: Int? = nil
+        latencyMillisecond: Int? = nil,
+        remedy: HealthRemedy? = nil
     ) {
+        self.remedy = remedy
         self.id = id
         self.group = group
         self.label = label

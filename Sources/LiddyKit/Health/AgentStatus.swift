@@ -13,8 +13,16 @@ public struct AgentStatus: Codable, Sendable, Equatable, Identifiable {
     public var symbolName: String
     /// Candidates for the real app icon, best first. Resolved in the app layer.
     public var bundleIdentifier: [String]
-    /// Holding at least one lease — the Mac is awake partly because of this agent.
+    /// Actually doing something right now.
+    ///
+    /// This used to mean "holds a Liddy lease", which is why the panel called a running
+    /// agent idle: a lease only exists if the Claude Code hook claimed one, or if the
+    /// process watcher matched a name in `watchPattern` while auto-watch was on and a
+    /// hold was live. Grok was not even in the default pattern. A session writing to
+    /// its transcript is evidence of work regardless of whether Liddy is involved.
     public var isWorking: Bool
+    /// Live sessions for this agent, from `SessionScanner`.
+    public var sessionCount: Int
     /// The lease labels attributed to this agent, for the tooltip.
     public var leaseLabel: [String]
     /// nil when the API was not probed. Idle agents are not probed on purpose: the
@@ -29,6 +37,7 @@ public struct AgentStatus: Codable, Sendable, Equatable, Identifiable {
         symbolName: String,
         bundleIdentifier: [String] = [],
         isWorking: Bool,
+        sessionCount: Int = 0,
         leaseLabel: [String] = [],
         serviceState: HealthState? = nil,
         serviceDetail: String? = nil,
@@ -39,6 +48,7 @@ public struct AgentStatus: Codable, Sendable, Equatable, Identifiable {
         self.symbolName = symbolName
         self.bundleIdentifier = bundleIdentifier
         self.isWorking = isWorking
+        self.sessionCount = sessionCount
         self.leaseLabel = leaseLabel
         self.serviceState = serviceState
         self.serviceDetail = serviceDetail
@@ -46,6 +56,10 @@ public struct AgentStatus: Codable, Sendable, Equatable, Identifiable {
     }
 
     public var workDisplay: String {
+        if sessionCount > 0 {
+            let suffix = sessionCount > 1 ? " ×\(sessionCount)" : ""
+            return (isWorking ? "working" : "open") + suffix
+        }
         guard isWorking else { return "idle" }
         return leaseLabel.count > 1 ? "working ×\(leaseLabel.count)" : "working"
     }
@@ -68,6 +82,7 @@ public struct AgentStatus: Codable, Sendable, Equatable, Identifiable {
     public static func build(
         activeLease: [String],
         health: HealthReport?,
+        session: [AgentSession] = [],
         catalog: [ServiceEndpoint] = ServiceEndpoint.known
     ) -> [AgentStatus] {
         let haystack = activeLease.map { (raw: $0, lowered: $0.lowercased()) }
@@ -77,12 +92,18 @@ public struct AgentStatus: Codable, Sendable, Equatable, Identifiable {
                 .filter { entry in endpoint.leaseMatch.contains { entry.lowered.contains($0) } }
                 .map(\.raw)
             let check = health?.check.first { $0.id == "service.\(endpoint.id)" }
+            // Sessions are matched on the service id the tool files its API health
+            // under, so the two halves of a row always describe the same vendor.
+            let mine = session.filter { $0.tool.serviceId == endpoint.id }
+            let isWorking = !matched.isEmpty
+                || mine.contains { $0.state == .working || $0.state == .running }
             return AgentStatus(
                 id: endpoint.id,
                 label: endpoint.label,
                 symbolName: endpoint.symbolName,
                 bundleIdentifier: endpoint.bundleIdentifier,
-                isWorking: !matched.isEmpty,
+                isWorking: isWorking,
+                sessionCount: mine.count,
                 leaseLabel: matched,
                 serviceState: check?.state,
                 serviceDetail: check?.detail,

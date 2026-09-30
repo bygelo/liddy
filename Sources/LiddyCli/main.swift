@@ -193,6 +193,9 @@ guard let command = argument.first else {
       liddy setting                    show thresholds
       liddy set --soft-battery 25 --idle-release 5m --charging-only on
       liddy set --network-probe off    stop probing DNS and agent APIs
+      liddy set --resource-saver on    hide Chrome and friends while a hold runs
+      liddy top                        what is eating the machine right now
+      liddy session                    live CLI agent sessions, per project
       liddy hook install [--project]   hold the Mac only while Claude Code works
       liddy doctor                     check the install, find a stuck disablesleep
     """)
@@ -282,6 +285,40 @@ case "log":
 case "setting":
     report(send(.settingList))
 
+// Tab Warden: every live CLI agent session, from the transcripts the tools write.
+// Read straight off the filesystem rather than through the app socket, so it answers
+// whether or not Liddy is running.
+case "session", "sessions":
+    let live = SessionScanner.live()
+    let found = SessionScanner.scan(live: live, limit: 20)
+    if found.isEmpty {
+        print("no agent sessions running")
+    } else {
+        for entry in found {
+            let state = entry.state.display.padding(toLength: 9, withPad: " ", startingAt: 0)
+            let tool = entry.tool.label.padding(toLength: 7, withPad: " ", startingAt: 0)
+            let age = entry.ageDisplay().padding(toLength: 4, withPad: " ", startingAt: 0)
+            let branch = entry.branch.map { " (\($0))" } ?? ""
+            print("\(state) \(tool) \(age) \(entry.projectDisplay)\(branch)")
+        }
+    }
+    exit(0)
+
+// Visibility, not a decision: nothing in the governor reads this. See `ProcessLoad`.
+case "top":
+    let limit = flagValue("-n", in: rest).flatMap(Int.init) ?? 6
+    let load = ProcessLoad.top(ProcessLoad.sample(), limit: limit, minimumCpuPercent: 1)
+    if load.isEmpty {
+        print("nothing above 1% CPU")
+    } else {
+        for entry in load {
+            let cpu = String(format: "%5.1f", entry.cpuPercent)
+            let memory = String(format: "%5.1f", entry.memoryPercent)
+            print("\(cpu)% cpu  \(memory)% mem  \(entry.name)")
+        }
+    }
+    exit(0)
+
 case "set":
     var patch = SettingPatch()
     patch.softBatteryPercent = flagValue("--soft-battery", in: rest).flatMap(Int.init)
@@ -294,9 +331,28 @@ case "set":
     if let probe = flagValue("--network-probe", in: rest) {
         patch.isNetworkProbeOn = probe == "on" || probe == "true"
     }
+    if let health = flagValue("--health-panel", in: rest) {
+        patch.isHealthPanelOn = health == "on" || health == "true"
+    }
+    if let dim = flagValue("--lid-brightness-off", in: rest) {
+        patch.isLidBrightnessOff = dim == "on" || dim == "true"
+    }
+    if let saver = flagValue("--resource-saver", in: rest) {
+        patch.isResourceSaverOn = saver == "on" || saver == "true"
+    }
+    // Comma-separated because these are app names with spaces in them — "Google
+    // Chrome", not "chrome" — so whitespace cannot be the separator.
+    if let app = flagValue("--background-app", in: rest) {
+        patch.backgroundApp = app
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
     guard !patch.isEmpty else {
         fail("usage: liddy set [--soft-battery 25] [--hard-battery 5] [--idle-release 5m] "
-             + "[--thermal-ceiling serious] [--charging-only on|off] [--network-probe on|off]")
+             + "[--thermal-ceiling serious] [--charging-only on|off] [--network-probe on|off] "
+             + "[--health-panel on|off] [--lid-brightness-off on|off] [--resource-saver on|off] "
+             + "[--background-app \"Google Chrome,Discord\"]")
     }
     report(send(.updateSetting(patch)))
 

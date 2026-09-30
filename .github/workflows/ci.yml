@@ -1,0 +1,33 @@
+name: CI
+
+# The gate, on every push — not only on tags. `swift build` can exit 0 from cache
+# while `swift test` fails to compile, so a broken tree used to look green and
+# `Script/build-app.sh` would happily ship an app whose CLI does not build.
+# The gate command is `swift build && swift test`, never `swift build` alone.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    # arm64 image with Xcode 16. Liddy is Apple silicon only — it reads IOKit power
+    # state and drives pmset, and there is no Intel build to test on.
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test

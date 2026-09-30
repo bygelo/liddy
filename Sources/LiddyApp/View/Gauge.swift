@@ -23,6 +23,24 @@ enum Palette {
         }
     }
 
+    /// Die temperature against the throttling point, not against an arbitrary scale:
+    /// Apple silicon runs happily in the 60s and starts throttling hard around 90°C.
+    /// Falls back to the pressure state's colour when no sensor answered.
+    static func temperatureColor(_ celsius: Double?, level: ThermalLevel) -> Color {
+        guard let celsius else { return color(for: level) }
+        if celsius >= 90 { return .red }
+        if celsius >= 75 { return .orange }
+        return .green
+    }
+
+    /// CPU share, coloured on the same scale the rest of the panel uses: green is
+    /// fine, amber is worth knowing, red is the thing cooking the laptop.
+    static func loadColor(_ cpuPercent: Double) -> Color {
+        if cpuPercent >= 80 { return .red }
+        if cpuPercent >= 40 { return .orange }
+        return .green
+    }
+
     /// Battery colour tracks the floors, not an arbitrary 20/50 split — the ring goes
     /// amber exactly when the soft floor is the next thing that will happen.
     static func batteryColor(percent: Int?, setting soft: Int, hard: Int, isOnMain: Bool) -> Color {
@@ -52,14 +70,14 @@ struct RingGauge: View {
     var color: Color
     var content: Content
     var caption: String
-    var diameter: CGFloat = 62
+    var diameter: CGFloat = 58
     var lineWidth: CGFloat = 6
 
     /// The square that fits inside the track, minus a hair of breathing room.
-    private var innerWidth: CGFloat { diameter - (lineWidth * 2) - 6 }
+    private var innerWidth: CGFloat { diameter - (lineWidth * 2) - 5 }
 
     var body: some View {
-        VStack(spacing: 5) {
+        VStack(spacing: 4) {
             ZStack {
                 Circle()
                     .stroke(Color.secondary.opacity(0.22), lineWidth: lineWidth)
@@ -105,7 +123,7 @@ struct RingGauge: View {
                     .monospacedDigit()
                 if let unit {
                     Text(unit)
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -129,7 +147,7 @@ struct SegmentBar: View {
     var fraction: Double
     var color: Color
     var segmentCount: Int = 24
-    var height: CGFloat = 6
+    var height: CGFloat = 4
 
     var body: some View {
         let filled = Int((Double(segmentCount) * min(1, max(0, fraction))).rounded())
@@ -150,7 +168,7 @@ struct Sparkline: View {
     var value: [Double]
     var color: Color
     var barCount: Int
-    var height: CGFloat = 26
+    var height: CGFloat = 18
 
     var body: some View {
         let series = padded
@@ -176,6 +194,9 @@ struct Sparkline: View {
 /// A single answered check.
 struct HealthRow: View {
     var check: HealthCheck
+    /// nil in contexts with no model to act through — the CLI's text rendering, and
+    /// the group rows in the expanded panel.
+    var onFix: ((HealthRemedy) -> Void)?
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -196,6 +217,14 @@ struct HealthRow: View {
                 Text("\(millisecond)ms")
                     .font(.system(size: 9).monospacedDigit())
                     .foregroundStyle(.tertiary)
+            }
+            // A diagnosis with no next step leaves the user stuck. Only on rows that
+            // are actually failing: a green check with a button invites a click that
+            // does nothing.
+            if let remedy = check.remedy, let onFix, check.state >= .degraded {
+                Button(remedy.title) { onFix(remedy) }
+                    .buttonStyle(.link)
+                    .font(.system(size: 10, weight: .medium))
             }
         }
     }
@@ -237,5 +266,52 @@ struct SectionLabel: View {
                     .foregroundStyle(.tertiary)
             }
         }
+    }
+}
+
+
+/// A sectioned block: the panel's grouping unit.
+///
+/// Replaces the horizontal rules. A `Divider()` says "something changes here" without
+/// saying what belongs together — seven of them down a 300pt column read as a table of
+/// contents. A filled block states the grouping positively, which is how every
+/// menu-bar meter that shows more than one reading does it (iStat Menus, Stats), and
+/// it is what the user asked for over the rules.
+///
+/// Fill rather than stroke: a 1pt border at this size draws more attention than the
+/// content inside it, and stacked bordered boxes re-create exactly the busy grid the
+/// rules were.
+struct Card<Content: View>: View {
+    var content: Content
+    /// Overridable per card. The gauge card runs a narrower inset than the text cards
+    /// so its rings can be bigger without the panel getting wider — a ring is a shape
+    /// you read at a glance, and 8pt of side gutter bought nothing there that it buys
+    /// beside a line of text.
+    var horizontal: CGFloat
+    var top: CGFloat
+    var bottom: CGFloat
+
+    init(
+        horizontal: CGFloat = 8,
+        top: CGFloat = 6,
+        bottom: CGFloat = 6,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.horizontal = horizontal
+        self.top = top
+        self.bottom = bottom
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .padding(.horizontal, horizontal)
+            .padding(.top, top)
+            .padding(.bottom, bottom)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color.primary.opacity(0.06))
+            )
     }
 }

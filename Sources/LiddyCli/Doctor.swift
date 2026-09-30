@@ -23,6 +23,11 @@ enum Doctor {
         line(isOnPath, "on PATH", isOnPath ? "yes" : "no. Run Script/install-cli.sh")
 
         print("\nApp")
+        let isInApplications = FileManager.default.fileExists(atPath: AppInstall.applicationsPath)
+        line(isInApplications, "in Applications",
+             isInApplications
+                ? AppInstall.applicationsPath
+                : "missing. Drag Liddy.app to /Applications")
         let socketPath = LiddyPath.appSocket.path
         let isSocketPresent = FileManager.default.fileExists(atPath: socketPath)
         line(isSocketPresent, "socket", isSocketPresent ? socketPath : "missing. Is Liddy.app running?")
@@ -77,6 +82,27 @@ enum Doctor {
 
         let holder = PmsetReader.assertionHolder(pmsetText)
         line(nil, "keeping awake", holder.isEmpty ? "nothing" : holder)
+
+        // The load-bearing question this whole product rests on: does the lever we
+        // pull still move anything? `pmset` will happily report disablesleep=1 on a
+        // machine where the lid magnet forces sleep in hardware, so the kernel's own
+        // property is the only honest answer. Reported as three states, never two —
+        // with disablesleep off there is nothing to judge, and saying so beats
+        // inventing a verdict.
+        let causesSleep = ClamshellProbe.causesSleep()
+        let lever = ClamshellProbe.lever(
+            isDisableSleepOn: PmsetReader.isDisableSleepOn(pmsetText),
+            causesSleep: causesSleep
+        )
+        let kernelReading = causesSleep.map { $0 ? "yes" : "no" } ?? "property not found"
+        switch lever {
+        case .effective:
+            line(true, "clamshell lever", "effective (kernel: clamshell causes sleep = \(kernelReading))")
+        case .ineffective:
+            line(false, "clamshell lever", "INEFFECTIVE — disablesleep is on but the kernel still sleeps on lid close")
+        case .unknown:
+            line(nil, "clamshell lever", "unknown, disablesleep is off (kernel: clamshell causes sleep = \(kernelReading))")
+        }
 
         let isHookInstalled = HealthProbe.isClaudeHookInstalled()
         line(isHookInstalled, "claude hook", isHookInstalled ? "installed" : "not installed. Run liddy hook install")

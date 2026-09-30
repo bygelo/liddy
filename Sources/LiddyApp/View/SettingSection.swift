@@ -24,18 +24,7 @@ struct SettingSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Button {
-                isExpanded.toggle()
-            } label: {
-                HStack {
-                    SectionLabel(text: "Settings", trailing: isExpanded ? nil : summary)
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+            SectionLabel(text: "Settings", trailing: summary)
 
             if isExpanded {
                 battery
@@ -92,6 +81,26 @@ struct SettingSection: View {
 
     private var behaviour: some View {
         VStack(alignment: .leading, spacing: 6) {
+            Toggle("Open at login", isOn: Binding(
+                get: { model.isOpenAtLogin },
+                set: { model.setOpenAtLogin($0) }
+            ))
+            .disabled(!model.canOpenAtLogin)
+            .help(model.canOpenAtLogin
+                  ? "Launch Liddy when you log in. A menu-bar app with no Dock icon is otherwise gone after a reboot."
+                  : "Move Liddy.app to /Applications first. Login Items need a stable path.")
+
+            if model.loginItemNeedsApproval {
+                Button("Allow in System Settings…") { model.openLoginItemSettings() }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("macOS is waiting for you to allow Liddy under Login Items.")
+            } else if !model.canOpenAtLogin {
+                Text("Needs Liddy.app in /Applications")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
+
             HStack {
                 Text("Release after").font(.system(size: 11))
                 Spacer()
@@ -124,6 +133,32 @@ struct SettingSection: View {
                 get: { setting.isChargingOnly },
                 set: { model.updateSetting(SettingPatch(isChargingOnly: $0)) }
             ))
+
+            Toggle("Show health checks", isOn: Binding(
+                get: { setting.isHealthPanelOn },
+                set: { model.updateSetting(SettingPatch(isHealthPanelOn: $0)) }
+            ))
+            .help("Off by default. The checks still run either way — a failing one still turns the menu-bar glyph into a warning triangle and still appears as a single line in the panel. This only controls whether the passing ones are drawn.")
+
+            Toggle("Screen off while the lid is shut", isOn: Binding(
+                get: { setting.isLidBrightnessOff },
+                set: { model.updateSetting(SettingPatch(isLidBrightnessOff: $0)) }
+            ))
+            .help("Turns the backlight down to zero when the lid closes on a Liddy session, and puts it back at the level you left it when the lid opens. A closed panel that is still lit is watts and heat spent on a screen nobody can see.")
+
+            Toggle("Background apps while holding", isOn: Binding(
+                get: { setting.isResourceSaverOn },
+                set: { model.updateSetting(SettingPatch(isResourceSaverOn: $0)) }
+            ))
+            .help("Lid open: hides \(setting.backgroundApp.joined(separator: ", ")) while a hold runs. Lid shut: hides everything that is not keeping the work alive, since there is no screen to look at — never terminals, never an app with a live agent session, never Liddy or Finder. Everything is unhidden when the hold ends.")
+
+            if setting.isResourceSaverOn {
+                Text("lid open: \(setting.backgroundApp.joined(separator: ", ")) · lid shut: everything idle")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+                    .help("Edit this list with `liddy set --background-app \"Google Chrome,Discord\"`")
+            }
 
             Toggle("Check services over the network", isOn: Binding(
                 get: { setting.isNetworkProbeOn },

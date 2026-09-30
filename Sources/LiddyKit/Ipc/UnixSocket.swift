@@ -29,7 +29,15 @@ enum UnixSocket {
         }
     }
 
-    /// Read until newline. Returns nil at EOF.
+    /// The largest line this will accumulate before giving up on the connection.
+    /// Every real request here is a few hundred bytes of JSON; the cap exists because
+    /// the server side of this read runs as **root** in the helper, and a client that
+    /// never sends a newline would otherwise grow a root process's memory without
+    /// bound. 1 MiB is four orders of magnitude above the real traffic.
+    static let maxLineByte = 1 << 20
+
+    /// Read until newline. Returns nil at EOF, and also at `maxLineByte` without one —
+    /// the caller treats both the same way, by dropping the connection.
     static func readLine(fd: Int32, buffer: inout Data) -> Data? {
         while true {
             if let index = buffer.firstIndex(of: 0x0A) {
@@ -37,6 +45,7 @@ enum UnixSocket {
                 buffer = Data(buffer[buffer.index(after: index)...])
                 return Data(line)
             }
+            guard buffer.count <= maxLineByte else { return nil }
             var chunk = [UInt8](repeating: 0, count: 4096)
             let count = read(fd, &chunk, chunk.count)
             guard count > 0 else { return nil }
@@ -64,12 +73,22 @@ enum UnixSocket {
     }
 }
 
+/// Identifies one accepted connection for the lifetime of that connection.
+///
+/// It exists because "a connection closed" is not the same event as "*the* connection
+/// closed", and the helper's deadman switch depends on telling them apart.
+public struct ConnectionId: Hashable, Sendable {
+    public let raw: UInt64
+    public init(raw: UInt64) { self.raw = raw }
+}
+
 /// Line-delimited JSON server over AF_UNIX. One dispatch queue per connection —
 /// the connection count here is a handful, not a thundering herd.
 public final class LineSocketServer {
-    public typealias Handler = (Data) -> Data?
-    /// Fired when a connection closes. The helper's deadman switch hangs off this.
-    public typealias CloseHandler = () -> Void
+    public typealias Handler = (Data, ConnectionId) -> Data?
+    /// Fired when a connection closes, naming which one. The helper's deadman switch
+    /// hangs off this and reverts only for the connection that armed the toggle.
+    public typealias CloseHandler = (ConnectionId) -> Void
 
     private let path: String
     private let handler: Handler
@@ -77,6 +96,7 @@ public final class LineSocketServer {
     private var listenFd: Int32 = -1
     private let acceptQueue = DispatchQueue(label: "com.liddy.socket.accept")
     private var isStopped = false
+    private var nextConnectionRaw: UInt64 = 0
 
     public init(path: String, onClose: CloseHandler? = nil, handler: @escaping Handler) {
         self.path = path
@@ -126,21 +146,23 @@ public final class LineSocketServer {
                 usleep(50_000)
                 continue
             }
+            nextConnectionRaw += 1
+            let id = ConnectionId(raw: nextConnectionRaw)
             DispatchQueue(label: "com.liddy.socket.connection").async { [weak self] in
-                self?.serve(fd: fd)
+                self?.serve(fd: fd, id: id)
             }
         }
     }
 
-    private func serve(fd: Int32) {
+    private func serve(fd: Int32, id: ConnectionId) {
         defer {
             close(fd)
-            onClose?()
+            onClose?(id)
         }
         var buffer = Data()
         while let line = UnixSocket.readLine(fd: fd, buffer: &buffer) {
             guard !line.isEmpty else { continue }
-            if let reply = handler(line) {
+            if let reply = handler(line, id) {
                 var out = reply
                 out.append(0x0A)
                 guard UnixSocket.writeAll(fd: fd, data: out) else { return }

@@ -1,4 +1,5 @@
 import Foundation
+import IOKit
 
 /// Read-only `pmset -g`, shared by `liddy doctor` and the live health panel so the
 /// two can never disagree about whether the Mac is allowed to sleep.
@@ -18,9 +19,25 @@ public enum PmsetReader {
         return String(decoding: data, as: UTF8.self)
     }
 
+    /// `IOPMrootDomain`'s own `SleepDisabled`, which is what `pmset -g disablesleep`
+    /// reports — without the fork.
+    ///
+    /// `output()` costs 82ms of wall time and a subprocess; this is a registry read.
+    /// The health sweep asked for it on every pass, and `liddy doctor` asks twice. The
+    /// text path stays for the CLI's full dump and as what the parser below is tested
+    /// against.
+    public static func isDisableSleepOnFromRegistry() -> Bool? {
+        ClamshellProbe.registryFlag("SleepDisabled")
+    }
+
+    /// Registry first, text second. Same answer, 5000× cheaper.
+    public static func isDisableSleepOn() -> Bool {
+        isDisableSleepOnFromRegistry() ?? isDisableSleepOn(output())
+    }
+
     /// `pmset -g` omits `disablesleep` entirely when it is 0, so absent means normal
     /// sleep — it is not an inconclusive reading.
-    public static func isDisableSleepOn(_ text: String = output()) -> Bool {
+    public static func isDisableSleepOn(_ text: String) -> Bool {
         for row in text.split(separator: "\n") where row.lowercased().contains("disablesleep") {
             return row.trimmingCharacters(in: .whitespaces).hasSuffix("1")
         }

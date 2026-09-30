@@ -16,142 +16,95 @@ struct MenuView: View {
     private var snapshot: RuntimeSnapshot { model.snapshot }
     private var setting: Setting { model.setting }
 
+    /// Fixed. The window never resizes — see `PanelTab` for the four bugs that came
+    /// from a panel whose height was a function of its content.
+    ///
+    /// 330 is what the tallest *page* needs (Now, with four rings, the sparkline and
+    /// two rows of session pills). Pages that want more than this scroll inside the
+    /// page rather than growing the window.
+    /// One height for every page. The window is the same size always.
+    ///
+    /// Per-page heights were tried first and removed: they made the panel change shape
+    /// as you clicked between pages, which is its own kind of jumping around even
+    /// though each page was individually stable. A menu-bar panel should be one shape.
+    ///
+    /// The number is what the tallest page (Health) needs. The shorter pages are given
+    /// more to show rather than padded with empty panel — six processes instead of
+    /// three, nine session pills instead of six, a longer activity log — so the space
+    /// is used rather than left blank.
+    /// `LIDDY_PAGE_NATURAL=1` drops the fixed frame so each page can be measured at
+    /// the height its own content wants — which is where the constants below came from.
+    static var isMeasuringNaturalHeight: Bool {
+        ProcessInfo.processInfo.environment["LIDDY_PAGE_NATURAL"] == "1"
+    }
+
+    private static let pageHeight: CGFloat = 380
+
     var body: some View {
-        // Order is a claim about what matters. The control you came here to flip goes
-        // first; the readouts that explain what it is doing go under it. The first
-        // build had it backwards — the switch sat below four sections of analytics, so
-        // the one thing everybody opens this panel for was the last thing they reached.
-        VStack(alignment: .leading, spacing: 11) {
-            header
-            control
-            Divider()
-            gaugeRow
-            Divider()
-            session
-            Divider()
-            AgentSection(model: model, isExpanded: $model.isAgentExpanded)
-            Divider()
-            HealthSection(model: model, isExpanded: $model.isHealthExpanded)
-            Divider()
-            SettingSection(model: model, isExpanded: $model.isSettingExpanded)
-            Divider()
-            activity
-            footer
-            // Pins the content to the top of whatever height the window happens to be.
-            //
-            // A `VStack` centres itself in a container taller than its content, so any
-            // moment the window was larger than it needed to be — a resize arriving a
-            // frame late, a measurement one update behind — put *half the surplus above
-            // the content*. That is the space appearing at the top: not the window
-            // growing upward, but the content sliding down inside it.
-            //
-            // `minLength: 0` means the ideal height is unchanged, so this costs nothing
-            // when the fit is exact and only does something when it is not.
-            Spacer(minLength: 0)
+        VStack(alignment: .leading, spacing: 6) {
+            if Self.isMeasuringNaturalHeight {
+                page
+            } else {
+                page
+                    .frame(height: Self.pageHeight, alignment: .top)
+                    .clipped()
+            }
+
+            Divider().opacity(0.4)
+
+            PanelTabBar(
+                selection: $model.tab,
+                healthProblemCount: snapshot.health?.problem.count ?? 0,
+                onQuit: {
+                    model.shutdown()
+                    NSApplication.shared.terminate(nil)
+                })
         }
-        .padding(14)
-        .frame(width: 340)
+        .padding(.horizontal, 10)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+        .frame(width: 300)
         // Nothing in this panel animates, by rule.
         //
         // It is a readout you open for four seconds, so motion adds no information —
         // and every animation tried here has cost something. The countdown ring was the
         // worst: `timerFraction` is recomputed from `Date()` on every render, so an
-        // eased arc re-animated on each redraw and the ring never settled. The panel
-        // also resizes its own window, which animated layout fights.
-        //
-        // A blanket transaction rather than deleting modifiers one at a time: this way
-        // a `withAnimation` added later cannot quietly bring the twitch back.
+        // eased arc re-animated on each redraw and the ring never settled.
         .transaction { $0.animation = nil }
     }
 
-    // MARK: - Header
-
-    /// Status on the left, the primary switch on the right — the shape every menu-bar
-    /// utility with one main job uses, because it puts the control where the pointer
-    /// already is when the panel opens.
-    private var header: some View {
-        HStack(spacing: 9) {
-            ZStack {
-                Circle()
-                    .fill(statusColor.opacity(0.22))
-                    .frame(width: 18, height: 18)
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 8, height: 8)
+    @ViewBuilder
+    private var page: some View {
+        switch model.tab {
+        case .now:
+            VStack(alignment: .leading, spacing: 5) {
+                Card { control }
+                Card(horizontal: 4, top: 10, bottom: 7) { metric }
+                Card { SessionSection(model: model) }
             }
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 6) {
-                    Text(statusTitle).font(.system(size: 14, weight: .semibold))
-                    if snapshot.isAwakeHeld {
-                        Text(elapsedDisplay)
-                            .font(.system(size: 11, weight: .medium).monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                // Two lines of space held open whether or not both are used. The status
-                // line grows a second line in exactly the states you switch *between*
-                // — "Battery crossed the floor, won't re-arm until it recovers" wraps,
-                // "Smart, releases when work stops" does not — so letting it size
-                // itself moved the whole panel on a mode change.
-                Text(statusDetail)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(height: 26, alignment: .topLeading)
+        case .apps:
+            VStack(alignment: .leading, spacing: 5) {
+                Card { load(limit: 6) }
+                Card { SessionSection(model: model) }
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 8)
-            // No switch here any more. The mode selector directly below *is* the
-            // control, and a second one that sets the same state read as clutter and
-            // invited the two to disagree.
-            if snapshot.isAwakeHeld {
-                Image(systemName: snapshot.isClamshellActive ? "laptopcomputer.slash" : "bolt.fill")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(statusColor)
+        case .health:
+            // The one page that can outgrow the window, on a machine with a lot of
+            // checks. It scrolls; the window does not move.
+            ScrollView(.vertical, showsIndicators: false) {
+                Card { HealthSection(model: model, isExpanded: .constant(true)) }
             }
+        case .setting:
+            ScrollView(.vertical, showsIndicators: false) {
+                Card { SettingSection(model: model, isExpanded: .constant(true)) }
+            }
+        case .activity:
+            Card { activity }
         }
     }
 
-    private var statusColor: Color {
-        if snapshot.overrideUntil != nil || snapshot.blockedBy != nil { return .orange }
-        if snapshot.isClamshellActive { return .blue }
-        return snapshot.isAwakeHeld ? .green : .secondary
-    }
-
-    /// "Holding back" is its own state, distinct from "Idle".
-    ///
-    /// Idle means nothing wants the Mac awake. Holding back means something does and
-    /// the governor is refusing — which is what you are looking at when five leases are
-    /// live, the ring is full, and the Mac is sleeping anyway.
-    private var statusTitle: String {
-        if snapshot.overrideUntil != nil { return "Keeping going" }
-        if snapshot.blockedBy != nil { return "Holding back" }
-        if snapshot.isClamshellActive { return "Protected, lid can close" }
-        if snapshot.isAwakeHeld { return "Keeping awake" }
-        return snapshot.isUserPaused ? "Paused by you" : "Idle"
-    }
-
-    private var statusDetail: String {
-        if snapshot.overrideUntil != nil {
-            return "Safety rules waived by you. Hard floor still applies"
-        }
-        if let blocked = snapshot.blockedBy {
-            return "\(blocked.summary). Won't re-arm until it recovers"
-        }
-        // Named explicitly, because the alternative reads as a broken switch: with work
-        // running, "off" and "off but five things want it on" look identical until the
-        // panel says which one you are in.
-        if snapshot.isUserPaused && !snapshot.isAwakeHeld {
-            return snapshot.activeLease.isEmpty
-                ? "Auto-watch won't turn this back on"
-                : "\(snapshot.activeLease.count) running. Auto-watch won't turn this back on"
-        }
-        if let reason = snapshot.lastStopReason, !snapshot.isAwakeHeld {
-            return "Last stop: \(reason.summary)"
-        }
-        return snapshot.mode == .manual ? "Manual hold" : "Smart, releases when work stops"
-    }
-
+    /// "34m" / "2h 5m". Lives on the mode selector's caption line now that the header
+    /// card is gone.
     private var elapsedDisplay: String {
         let second = snapshot.runtimeSecond
         return second < 3600
@@ -162,9 +115,10 @@ struct MenuView: View {
     // MARK: - Gauges
 
     private var gaugeRow: some View {
-        HStack(alignment: .top, spacing: 4) {
+        HStack(alignment: .top, spacing: 0) {
             batteryGauge
             thermalGauge
+            cpuGauge
             sessionGauge
         }
     }
@@ -184,17 +138,35 @@ struct MenuView: View {
         )
     }
 
+    /// Degrees in the ring, the pressure word underneath.
+    ///
+    /// It used to be a thermometer glyph over the word "fair", which is where "the
+    /// temperature is not accurate" came from: `thermalState` is a throttling-pressure
+    /// signal, not a temperature, and it sits at `fair` on a machine whose die is at
+    /// 38°C. Both are now shown, and they are no longer pretending to be each other —
+    /// the number is the die, the word is still what the governor acts on.
     private var thermalGauge: some View {
-        let level = snapshot.thermal.level
+        let thermal = snapshot.thermal
         return RingGauge(
-            // Nominal still shows a quarter ring: an empty circle reads as "no data"
-            // rather than "cool".
-            fraction: Double(level.rank + 1) / 4,
-            color: Palette.color(for: level),
-            // The word goes in the caption, not the ring — "Very hot" rendered straight
-            // over the stroke when it lived inside the circle.
-            content: .symbol("thermometer.medium"),
-            caption: level.display.lowercased()
+            // Filled against 90°C, the point at which Apple silicon starts throttling
+            // hard. Falls back to the four-step rank when no sensor answered.
+            fraction: thermal.celsius.map { min(1, $0 / 90) } ?? Double(thermal.level.rank + 1) / 4,
+            color: Palette.temperatureColor(thermal.celsius, level: thermal.level),
+            content: thermal.celsius.map { .number("\(Int($0.rounded()))", unit: "°") }
+                ?? .symbol("thermometer.medium"),
+            caption: thermal.level.display.lowercased()
+        )
+    }
+
+    /// The fourth ring. Three readings could not answer "is something pinning this
+    /// machine" — the temperature says it is hot, and the load says what is doing it.
+    private var cpuGauge: some View {
+        let percent = snapshot.cpuPercent
+        return RingGauge(
+            fraction: (percent ?? 0) / 100,
+            color: Palette.loadColor(percent ?? 0),
+            content: percent.map { .number("\(Int($0.rounded()))", unit: "%") } ?? .symbol("cpu"),
+            caption: "cpu"
         )
     }
 
@@ -249,38 +221,26 @@ struct MenuView: View {
         return remaining.caption
     }
 
-    // MARK: - Session
+    // MARK: - Metrics
 
-    /// Tall enough for three lease rows and the "+N more" line, always.
+    /// The three rings, the lease sparkline and the session timer, in one block.
     ///
-    /// This is the fix for the panel resizing itself seconds after a click. Switching
-    /// to Sleep releases every lease, so the list collapses from four rows to one line;
-    /// switching back to Awake lets the watcher repopulate it ~10s later and it grows
-    /// again. Four rows is about 60pt, so the window jumped by that much — twice —
-    /// without the user touching anything in between.
-    ///
-    /// Reserving the space costs a little emptiness on an idle Mac and buys a panel
-    /// whose size is a function of *what you opened*, not of what the watcher happened
-    /// to find while you were reading it.
-    /// 66, not 62: three 11pt rows (~13.2 each) plus two 4pt gaps, then a 4pt gap and
-    /// the 9pt "+N more" line (~10.8) comes to ~62.4. Sized to the content it has to
-    /// hold, with a little margin, rather than to a round number that clips it.
-    private static let leaseListHeight: CGFloat = 66
-
-    private var session: some View {
+    /// "Why awake" used to be a section of its own: a label, up to three lease rows, a
+    /// "+N more" line, a sparkline and a progress bar. But the third ring already counts
+    /// the live leases and the Sessions card below already names what is running, so the
+    /// list was the same fact written a third time — and it was the single tallest thing
+    /// on the panel. What is kept is the part the rings cannot show: the shape of the
+    /// last few minutes, and how far through a timed session you are.
+    private var metric: some View {
         VStack(alignment: .leading, spacing: 6) {
-            SectionLabel(text: "Why awake", trailing: sparklineSpan)
-
-            leaseList
-                .frame(height: Self.leaseListHeight, alignment: .topLeading)
+            gaugeRow
 
             Sparkline(
                 value: model.recentSample.map { Double($0.leaseCount) },
                 color: .green,
-                barCount: AppModel.sparklineSampleCount
-            )
+                barCount: AppModel.sparklineSampleCount)
 
-            // Always laid out, only sometimes visible. A bar that appears when a timer
+            // Always laid out, only sometimes visible: a bar that appears when a timer
             // starts is another 12pt of window movement, and "Lid shut" starts an 8h
             // timer — so the mode with the biggest jump was the one that also had this.
             SegmentBar(fraction: snapshot.timerFraction ?? 0, color: .blue)
@@ -288,41 +248,83 @@ struct MenuView: View {
         }
     }
 
+    // MARK: - Health, when the panel is off
+
+    private var hasHealthProblem: Bool {
+        !(snapshot.health?.problem.isEmpty ?? true)
+    }
+
+    /// The whole health section, reduced to one line.
+    ///
+    /// The checks still run with the panel off — the menu-bar glyph still becomes a
+    /// warning triangle — but a wall of green rows nobody reads is the text that was
+    /// asked to go. A *failing* check is never hidden: it appears here, and tapping it
+    /// turns the full panel back on.
     @ViewBuilder
-    private var leaseList: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if snapshot.activeLease.isEmpty {
-                Text(snapshot.isAwakeHeld ? "Held manually, nothing tracked" : "Nothing running")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                // Three, not the whole list: a busy machine can hold a dozen leases,
-                // and the panel below this is the part worth scrolling to. The full
-                // list is one `liddy lease` away.
-                ForEach(snapshot.activeLease.prefix(3), id: \.self) { lease in
-                    HStack(spacing: 6) {
-                        Circle().fill(Color.green).frame(width: 5, height: 5)
-                        Text(lease)
-                            .font(.system(size: 11))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                }
-                if snapshot.activeLease.count > 3 {
-                    Text("+\(snapshot.activeLease.count - 3) more")
+    private var healthWarning: some View {
+        if let report = snapshot.health, !report.problem.isEmpty {
+            Button { model.updateSetting(SettingPatch(isHealthPanelOn: true)) } label: {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Palette.color(for: report.overall))
+                        .frame(width: 6, height: 6)
+                    Text(report.problem.count == 1
+                         ? report.problem[0].label
+                         : "\(report.problem.count) checks need attention")
+                        .font(.system(size: 11))
+                    Spacer(minLength: 4)
+                    Text("show")
                         .font(.system(size: 9))
                         .foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    // MARK: - Load
+
+    /// Who is actually eating the machine.
+    ///
+    /// The panel's standing rule is that every reading on it can end a hold, and this
+    /// one cannot — it is here because the user asked to see what is hampering
+    /// performance. It reads, it never decides: a CPU threshold driving the hold is
+    /// rejected in the README and stays rejected.
+    private func load(limit: Int = 3) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            SectionLabel(text: "Using the most", trailing: backgroundedSummary)
+
+            ForEach(snapshot.topLoad.prefix(limit), id: \.pid) { entry in
+                HStack(spacing: 6) {
+                    Text(entry.name)
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if snapshot.backgroundedApp.contains(where: { $0.caseInsensitiveCompare(entry.name) == .orderedSame }) {
+                        Image(systemName: "eye.slash")
+                            .font(.system(size: 8))
+                            .foregroundStyle(.tertiary)
+                            .help("Backgrounded by Liddy for the duration of this hold")
+                    }
+                    Spacer(minLength: 6)
+                    Text("\(Int(entry.cpuPercent.rounded()))%")
+                        .font(.system(size: 11, weight: .medium).monospacedDigit())
+                        .foregroundStyle(Palette.loadColor(entry.cpuPercent))
+                    Text("\(Int(entry.memoryPercent.rounded()))%")
+                        .font(.system(size: 9).monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 26, alignment: .trailing)
+                        .help("Share of physical memory")
                 }
             }
         }
     }
 
-    /// How far back the sparkline actually reaches — an unlabelled strip invites the
-    /// reader to guess, and they will guess wrong on a Mac that just woke up.
-    private var sparklineSpan: String? {
-        guard let first = model.recentSample.first else { return nil }
-        let minute = Int(Date().timeIntervalSince(first.at) / 60)
-        return minute < 1 ? "last minute" : "last \(minute)m"
+    private var backgroundedSummary: String? {
+        let count = snapshot.backgroundedApp.count
+        guard count > 0 else { return snapshot.dimmedFrom != nil ? "screen off" : nil }
+        return count == 1 ? "1 backgrounded" : "\(count) backgrounded"
     }
 
     // MARK: - Control
@@ -370,8 +372,12 @@ struct MenuView: View {
     }
 
     private var control: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ModeSelector(selection: currentMode) { model.select(mode: $0) }
+        VStack(alignment: .leading, spacing: 5) {
+            ModeSelector(
+                selection: currentMode,
+                elapsed: snapshot.isAwakeHeld ? elapsedDisplay : nil,
+                blocked: snapshot.blockedBy.map { "\($0.summary). Won't re-arm until it recovers" }
+            ) { model.select(mode: $0) }
 
             if let until = snapshot.overrideUntil {
                 OverrideActiveBanner(until: until) { model.cancelOverride() }
@@ -405,46 +411,22 @@ struct MenuView: View {
 
     // MARK: - Activity
 
+    /// The activity log. Always open — it is a page now, not a disclosure.
     private var activity: some View {
         VStack(alignment: .leading, spacing: 3) {
-            // Unanimated on purpose — see the note in `HealthSection`.
-            Button {
-                model.isActivityExpanded.toggle()
-            } label: {
-                HStack {
-                    SectionLabel(text: "Activity")
-                    Image(systemName: model.isActivityExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+            SectionLabel(text: "Activity")
 
             if model.recentEntry.isEmpty {
                 Text("Nothing yet").font(.caption2).foregroundStyle(.secondary)
             }
-            ForEach(Array(model.recentEntry.prefix(model.isActivityExpanded ? 10 : 3).enumerated()), id: \.offset) { _, entry in
+            ForEach(Array(model.recentEntry.prefix(12).enumerated()), id: \.offset) { _, entry in
                 Text("\(entry.at.formatted(date: .omitted, time: .shortened))  \(entry.detail)")
                     .font(.caption2.monospaced())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-        }
-    }
-
-    private var footer: some View {
-        HStack {
-            if let alert = model.alert {
-                Text(alert).font(.caption2).foregroundStyle(.orange).lineLimit(2)
-            }
-            Spacer()
-            Button("Quit") {
-                model.shutdown()
-                NSApplication.shared.terminate(nil)
-            }
-            .controlSize(.small)
+            Spacer(minLength: 0)
         }
     }
 }

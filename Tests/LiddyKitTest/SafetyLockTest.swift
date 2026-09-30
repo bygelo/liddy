@@ -1,6 +1,19 @@
 import XCTest
 @testable import LiddyKit
 
+extension XCTestCase {
+    /// A helper-socket path that deliberately does not exist.
+    ///
+    /// Every `LiddyRuntime` built in a test must be pointed here. The default
+    /// `HelperClient()` dials `/var/run/liddy-helper.sock` — the **live root daemon** —
+    /// so a test that drove the battery under the hard floor reached the real helper,
+    /// which ran `pmset sleepnow` and slept the developer's Mac. That happened three
+    /// times on 2026-09-11 before the helper's own log named it.
+    static var deadHelperSocketPath: String {
+        "/private/tmp/liddy-test-helper-\(UUID().uuidString).sock"
+    }
+}
+
 /// Regression coverage for the flap: the soft battery floor released the hold, and
 /// auto-watch re-acquired it ~10s later because the watched processes were obviously
 /// still running — so the floor never actually let the Mac sleep. Observed live as the
@@ -108,6 +121,7 @@ final class SafetyLockTest: XCTestCase {
         LiddyRuntime(
             setting: .default,                       // soft 20, hard 4
             log: ActivityLog(url: logUrl),
+            helper: HelperClient(path: Self.deadHelperSocketPath),
             battery: { power.battery },
             thermal: { power.thermal })
     }
@@ -264,6 +278,7 @@ final class UserPauseTest: XCTestCase {
         LiddyRuntime(
             setting: .default,
             log: ActivityLog(url: logUrl),
+            helper: HelperClient(path: Self.deadHelperSocketPath),
             battery: { power.battery },
             thermal: { power.thermal })
     }
@@ -459,6 +474,7 @@ final class OverrideRuntimeTest: XCTestCase {
         LiddyRuntime(
             setting: .default,
             log: ActivityLog(url: logUrl),
+            helper: HelperClient(path: Self.deadHelperSocketPath),
             battery: { power.battery },
             thermal: { power.thermal })
     }

@@ -48,6 +48,14 @@ struct ModeSelector: View {
     }
 
     var selection: Mode
+    /// How long the current hold has been running, "0m"-style. nil when nothing is
+    /// held. It rides on the caption line because that line exists either way, so
+    /// carrying it here costs no height — which is what let the header above be
+    /// deleted outright rather than shrunk.
+    var elapsed: String?
+    /// Named when the governor is refusing to re-arm, so the one state the segmented
+    /// control cannot express still has somewhere to say so.
+    var blocked: String?
     var onSelect: (Mode) -> Void
 
     var body: some View {
@@ -61,9 +69,19 @@ struct ModeSelector: View {
                     .fill(Color.primary.opacity(0.06))
             )
 
-            Text(selection.caption)
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Text(blocked ?? selection.caption)
+                    .font(.system(size: 10))
+                    .foregroundStyle(blocked == nil ? .secondary : Color.orange)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 4)
+                if let elapsed {
+                    Text(elapsed)
+                        .font(.system(size: 10, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 

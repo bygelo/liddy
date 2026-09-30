@@ -16,10 +16,26 @@ final class AppModel: ObservableObject {
     /// because the window has to resize itself when one opens, and the panel
     /// controller can only see state it can subscribe to. Keeping them here also means
     /// a section you opened is still open the next time you click the icon.
-    @Published var isAgentExpanded = false
-    @Published var isHealthExpanded = false
-    @Published var isActivityExpanded = false
-    @Published var isSettingExpanded = false
+    /// `LIDDY_MEASURE_PANEL` opens every disclosure, so the measurement covers the
+    /// tallest the panel can get rather than its resting height — which is the case
+    /// that ran off the screen.
+    /// Which page the panel is showing. Replaces the four disclosure flags.
+    /// `LIDDY_TAB=health` opens the panel on a given page, so the measurement harness
+    /// can check every page rather than only the default one.
+    @Published var tab: PanelTab = ProcessInfo.processInfo.environment["LIDDY_TAB"]
+        .flatMap(PanelTab.init(rawValue:)) ?? .now
+    @Published var isHealthExpanded = ProcessInfo.processInfo.environment["LIDDY_EXPAND_ALL"] != nil
+
+    @Published var isActivityExpanded = ProcessInfo.processInfo.environment["LIDDY_EXPAND_ALL"] != nil
+    @Published var isSettingExpanded = ProcessInfo.processInfo.environment["LIDDY_EXPAND_ALL"] != nil
+    /// Open at Login is an OS-level bit, not a field in `setting.json`. Published so
+    /// the toggle reflects a change made in System Settings while the panel is open.
+    @Published var isOpenAtLogin = LoginItem.isEnabled
+    @Published var loginItemNeedsApproval = false
+
+    /// Login Items resolve the app by path. A copy outside `/Applications` would
+    /// register, then vanish the next time that path is replaced.
+    var canOpenAtLogin: Bool { LoginItem.canRegister }
 
     /// How many samples the sparkline draws. Also the width of the strip in bars.
     static let sparklineSampleCount = 48
@@ -27,20 +43,25 @@ final class AppModel: ObservableObject {
     /// `nonisolated` on purpose: the runtime is internally queue-confined and safe to
     /// call from any thread, and the CLI socket handler must reach it without hopping
     /// to the main actor — a `liddy status` in a script cannot wait on UI work.
-    nonisolated private let runtime = LiddyRuntime()
+    /// The app target is the only one with a window server, so it is the only one that
+    /// passes a real `AppBackgrounding`. The CLI keeps the no-op.
+    nonisolated private let runtime = LiddyRuntime(backgrounder: WorkspaceBackgrounder())
     private var server: LineSocketServer?
 
     init() {
         runtime.onChange = { [weak self] snapshot in
             Task { @MainActor in
                 guard let self else { return }
+                // The menu-bar icon is derived from this, so it is always assigned.
                 self.snapshot = snapshot
-                self.recentEntry = self.runtime.recentLog(limit: 12)
-                self.recentSample = self.runtime.recentSample(limit: Self.sparklineSampleCount)
-                // The panel draws thresholds, not just readings — a battery ring that
-                // turns amber at the soft floor has to know where the floor moved to.
-                self.setting = self.runtime.currentSetting
-                self.refreshHelperReadiness()
+                // Everything below is drawn only inside the panel, and it was being
+                // recomputed eighteen times a minute with the panel shut: the activity
+                // log re-read, the 48-sample sparkline series copied, the setting
+                // re-loaded, the helper's install state stat'ed and a Login Items query
+                // made. None of it has a reader until the panel opens, and the panel
+                // does a full refresh when it does.
+                guard self.isPanelVisible else { return }
+                self.refreshPanelData()
             }
         }
         runtime.onAlert = { [weak self] message in
@@ -60,6 +81,7 @@ final class AppModel: ObservableObject {
         recentSample = runtime.recentSample(limit: Self.sparklineSampleCount)
         setting = runtime.currentSetting
         runtime.refreshHealth()
+        refreshLoginItem()
     }
 
     /// Wired to app termination. Anything turned on must come back off here — the
@@ -130,6 +152,29 @@ final class AppModel: ObservableObject {
         runtime.endHold(reason: .userStopped)
     }
 
+    /// Passed straight through: the panel being on screen is what decides whether the
+    /// runtime samples the readings only the panel shows.
+    nonisolated func setPanelVisible(_ isVisible: Bool) {
+        runtime.setPanelVisible(isVisible)
+        Task { @MainActor in
+            self.isPanelVisible = isVisible
+            if isVisible { self.refreshPanelData() }
+        }
+    }
+
+    /// Readings with no reader while the panel is shut.
+    private func refreshPanelData() {
+        recentEntry = runtime.recentLog(limit: 12)
+        recentSample = runtime.recentSample(limit: Self.sparklineSampleCount)
+        // The panel draws thresholds, not just readings — a battery ring that turns
+        // amber at the soft floor has to know where the floor moved to.
+        setting = runtime.currentSetting
+        refreshHelperReadiness()
+        refreshLoginItem()
+    }
+
+    private var isPanelVisible = false
+
     func refreshHealth() {
         alert = nil
         // Refresh means "look again at everything", which includes which agent apps
@@ -188,13 +233,124 @@ final class AppModel: ObservableObject {
         runtime.refreshHealth()
     }
 
+    func setOpenAtLogin(_ isOn: Bool) {
+        alert = nil
+        do {
+            try LoginItem.setEnabled(isOn)
+        } catch {
+            alert = error.localizedDescription
+        }
+        refreshLoginItem()
+    }
+
+    /// Run a failing check's way out.
+    ///
+    /// One entry point rather than a closure per row, so every remedy is visible in one
+    /// place and none of them can quietly become a dead end. Each one either performs
+    /// the fix or opens the exact place it is performed — never prints a command.
+    func apply(_ remedy: HealthRemedy) {
+        switch remedy {
+        case .installHelper:
+            installHelper()
+        case .revealApp:
+            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: Bundle.main.bundlePath)])
+        case .openLoginItem:
+            openLoginItemSettings()
+        case .installHook:
+            installClaudeHook()
+        case .clearDisableSleep:
+            // Through the runtime, never by shelling out to pmset: the helper owns that
+            // toggle and its deadman switch is the reason it is safe to own.
+            runtime.clearStuckClamshell()
+            refreshHealth()
+        case .refresh:
+            refreshHealth()
+        case .openStatusPage:
+            if let url = URL(string: "https://status.anthropic.com") {
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+
+    /// Runs the **bundled CLI's** `hook install`, rather than a second copy of the
+    /// JSON-merging logic.
+    ///
+    /// That merge is genuinely fiddly — it has to be idempotent against a settings file
+    /// the user also edits, across three hook events — and two implementations of it
+    /// would drift. `Contents/Helpers/liddy` is the same binary the docs tell people to
+    /// run, so the button and the command cannot disagree.
+    private func installClaudeHook() {
+        guard let cli = Bundle.main.url(forAuxiliaryExecutable: "liddy")
+                ?? Bundle.main.builtInPlugInsURL.map({ $0.deletingLastPathComponent().appendingPathComponent("Helpers/liddy") })
+        else {
+            alert = "Bundled liddy CLI not found. Run liddy hook install in a terminal."
+            return
+        }
+
+        let process = Process()
+        process.executableURL = cli
+        process.arguments = ["hook", "install"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            alert = process.terminationStatus == 0
+                ? "Claude Code hook installed. New sessions hold the Mac per turn."
+                : "Could not write ~/.claude/settings.json. Run liddy hook install to see why."
+        } catch {
+            alert = "Could not run the bundled CLI: \(error.localizedDescription)"
+        }
+        refreshHealth()
+    }
+
+    func openLoginItemSettings() {
+        LoginItem.openSystemSettings()
+    }
+
+    private func refreshLoginItem() {
+        let isEnabled = LoginItem.isEnabled
+        let needsApproval = LoginItem.status == .requiresApproval
+        if isEnabled != isOpenAtLogin { isOpenAtLogin = isEnabled }
+        if needsApproval != loginItemNeedsApproval { loginItemNeedsApproval = needsApproval }
+    }
+
     // MARK: - CLI server
+
+    /// True when something is already listening on the app socket.
+    ///
+    /// `LineSocketServer.start` opens with `unlink(path)`, which is right for a stale
+    /// socket left by a crash and catastrophic for a live one: a second instance
+    /// deletes the running app's socket and binds its own, and the first instance keeps
+    /// a listener on an inode with no name. Every `liddy` command then reports "Liddy is
+    /// not running" while the menu bar still shows it running. Measured on 2026-09-11 by
+    /// doing exactly that.
+    static func isAnotherInstanceListening() -> Bool {
+        let probe = LineSocketClient(path: LiddyPath.appSocket.path)
+        guard (try? probe.connect(timeoutSecond: 1)) != nil else { return false }
+        probe.disconnect()
+        return true
+    }
 
     private func startServer() {
         try? LiddyPath.ensureSupportDirectory()
-        let server = LineSocketServer(path: LiddyPath.appSocket.path) { [weak self] line in
+        guard !Self.isAnotherInstanceListening() else {
+            runtime.setSocketBound(false, detail: "another Liddy is already running")
+            return
+        }
+        let server = LineSocketServer(path: LiddyPath.appSocket.path) { [weak self] line, _ in
             guard let self else { return nil }
-            let request = (try? Wire.decode(AppRequest.self, from: line)) ?? .status
+            // A decode failure used to fall back to `.status`, so a typo'd or
+            // version-skewed request got a plausible full snapshot back and the
+            // protocol bug stayed invisible. Now it is named on the wire — which is
+            // the difference between a lease API a third party can implement and one
+            // that lies to them.
+            let request: AppRequest
+            do {
+                request = try Wire.decode(AppRequest.self, from: line)
+            } catch {
+                return try? Wire.encoder.encode(AppResponse.failed("bad request: \(error)"))
+            }
             let response = self.handleSync(request)
             return try? Wire.encoder.encode(response)
         }

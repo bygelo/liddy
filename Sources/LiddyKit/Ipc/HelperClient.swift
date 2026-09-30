@@ -7,6 +7,7 @@ import Foundation
 /// normal sleep in the time it takes the kernel to close a file descriptor — not on
 /// next launch.
 public final class HelperClient {
+    private let path: String
     private let client: LineSocketClient
     private let heartbeatQueue = DispatchQueue(label: "com.liddy.helper.heartbeat")
     private var heartbeatTimer: DispatchSourceTimer?
@@ -17,11 +18,16 @@ public final class HelperClient {
     public var onDisconnect: (() -> Void)?
 
     public init(path: String = LiddyPath.helperSocketPath) {
+        self.path = path
         self.client = LineSocketClient(path: path)
     }
 
+    /// Checks **this client's** path, not the global one. It read the global constant
+    /// until 2026-09-11, which made every instance claim the real root helper was
+    /// reachable no matter where it was pointed — so a test that never meant to touch
+    /// the machine dialled the live daemon and slept the developer's Mac.
     public var isAvailable: Bool {
-        FileManager.default.fileExists(atPath: LiddyPath.helperSocketPath)
+        FileManager.default.fileExists(atPath: path)
     }
 
     /// Read by the health panel. Deliberately a property on the *existing* connection
@@ -45,6 +51,10 @@ public final class HelperClient {
 
     @discardableResult
     private func send(_ request: HelperRequest) throws -> HelperResponse {
+        // Never dial a socket that is not there. `sleepNow` is the reason this guard
+        // is not merely tidy: without it, any caller holding a client pointed at a
+        // non-existent path would still reach whatever the default path resolves to.
+        guard client.isConnected || isAvailable else { throw SocketError.closed }
         if !client.isConnected { try client.connect() }
         return try client.roundTrip(request, expecting: HelperResponse.self)
     }

@@ -17,6 +17,26 @@ public struct Setting: Codable, Sendable, Equatable {
     /// Executable name that counts as live work. Matched exactly against the
     /// process's basename (see `ProcessWatcher.matches`), not as a substring.
     public var watchPattern: [String]
+    /// Turn the internal display's backlight down while the lid is shut, and put it
+    /// back when the lid opens. A closed panel that is still lit is watts and heat
+    /// spent on a screen nobody can see.
+    public var isLidBrightnessOff: Bool
+    /// Hide the apps in `backgroundApp` while a hold is running, and unhide them when
+    /// it ends. Hiding is what macOS itself uses to make an app a candidate for App
+    /// Nap — occluded windows stop drawing, timers coalesce, and the CPU that was
+    /// going into a background Chrome goes into the work instead.
+    public var isResourceSaverOn: Bool
+    /// Application names to background while a hold runs. Matched against the running
+    /// application's localized name, so these are the names in the Dock — "Google
+    /// Chrome", not "chrome".
+    public var backgroundApp: [String]
+    /// Draw the health checks in the panel at all.
+    ///
+    /// Off by default after a direct user report that the panel was mostly text. The
+    /// checks still RUN — a failing one still turns the menu-bar glyph into a warning
+    /// triangle and still appears as a single line here — but a wall of green rows
+    /// nobody reads is exactly the text that was asked to go.
+    public var isHealthPanelOn: Bool
     /// Whether the health panel is allowed to touch the network — DNS, and a HEAD to
     /// the API of whichever agent is currently holding a lease. Off makes Liddy
     /// completely silent on the wire; the local half of the panel still works.
@@ -53,7 +73,14 @@ public struct Setting: Codable, Sendable, Equatable {
             "python", "pytest", "uv", "poetry",
             "docker", "ffmpeg", "rsync", "pandoc",
         ],
-        isNetworkProbeOn: true
+        isNetworkProbeOn: true,
+        // Off by default, unlike the other two. This one reaches outside Liddy and
+        // moves windows that belong to somebody else's app; a power tool a user opts
+        // into, not a default they discover by watching Chrome vanish.
+        isHealthPanelOn: false,
+        isLidBrightnessOff: true,
+        isResourceSaverOn: false,
+        backgroundApp: ["Google Chrome", "Discord", "Slack", "Spotify"]
     )
 
     public init(
@@ -63,7 +90,11 @@ public struct Setting: Codable, Sendable, Equatable {
         idleReleaseSecond: Int,
         isChargingOnly: Bool,
         watchPattern: [String],
-        isNetworkProbeOn: Bool = true
+        isNetworkProbeOn: Bool = true,
+        isHealthPanelOn: Bool = false,
+        isLidBrightnessOff: Bool = true,
+        isResourceSaverOn: Bool = false,
+        backgroundApp: [String] = Setting.defaultBackgroundApp
     ) {
         self.softBatteryPercent = softBatteryPercent
         self.hardBatteryPercent = hardBatteryPercent
@@ -72,7 +103,13 @@ public struct Setting: Codable, Sendable, Equatable {
         self.isChargingOnly = isChargingOnly
         self.watchPattern = watchPattern
         self.isNetworkProbeOn = isNetworkProbeOn
+        self.isHealthPanelOn = isHealthPanelOn
+        self.isLidBrightnessOff = isLidBrightnessOff
+        self.isResourceSaverOn = isResourceSaverOn
+        self.backgroundApp = backgroundApp
     }
+
+    public static let defaultBackgroundApp = ["Google Chrome", "Discord", "Slack", "Spotify"]
 
     /// Decoded field by field with a fallback per key.
     ///
@@ -97,6 +134,14 @@ public struct Setting: Codable, Sendable, Equatable {
             ?? fallback.watchPattern
         isNetworkProbeOn = try container.decodeIfPresent(Bool.self, forKey: .isNetworkProbeOn)
             ?? fallback.isNetworkProbeOn
+        isHealthPanelOn = try container.decodeIfPresent(Bool.self, forKey: .isHealthPanelOn)
+            ?? fallback.isHealthPanelOn
+        isLidBrightnessOff = try container.decodeIfPresent(Bool.self, forKey: .isLidBrightnessOff)
+            ?? fallback.isLidBrightnessOff
+        isResourceSaverOn = try container.decodeIfPresent(Bool.self, forKey: .isResourceSaverOn)
+            ?? fallback.isResourceSaverOn
+        backgroundApp = try container.decodeIfPresent([String].self, forKey: .backgroundApp)
+            ?? fallback.backgroundApp
     }
 
     /// Clamp anything a hand-edited config file could get wrong. A soft floor below

@@ -118,7 +118,7 @@ Claims are keyed and idempotent, so firing on every turn renews one lease instea
 
 ## The menu bar
 
-The switch is first. Everything under it explains what the switch is doing — **why is my Mac awake**, and **what will stop it**.
+The switch is first. Everything under it explains what the switch is doing — **why is my Mac awake**, and **what will stop it**. The menu-bar glyph carries the battery percent next to it, so the number that can end a hold is visible without opening the panel.
 
 **Off stays off.** Turning the hold off by hand pauses auto-watch too. Without that, "off" is meaningless in the only situation you would ever use it: the watched processes are still running — that is *why* the Mac was awake — so the next scan re-acquires within ten seconds and the switch flips itself back on while you are looking at it. The panel says **Paused by you**, and names how many things are running that it is now ignoring. An explicit `liddy claim` lifts the pause, because a script saying "I am working now" is somebody asking out loud; a pause set on Tuesday should not silently cost you Friday's overnight run.
 
@@ -128,29 +128,63 @@ Three rings across the top, each one a quantity that can end a hold — battery 
 
 Under them, what is holding the Mac, a sparkline of lease activity over the last ~4 minutes (48 samples at the runtime's 5s tick — the strip carries its own "last 3m" label, since a chart that makes you guess its span will be guessed wrong), and a segmented bar for a timed session's progress.
 
-### Agents
+### Tab Warden
 
-One row per known agent — **Claude, Codex, Antigravity, Grok, Cursor, Copilot** — with two independent signals: whether it is *working* (holding a lease) and whether its *API answers*.
+Every live CLI agent session on this Mac, as a wrapping row of pills — the repo name, the agent's real app icon (borrowed from the copy installed on this Mac; nothing is redistributed), and a state colour. Tool, branch, age and directory are on hover.
+
+| Colour | State | Means |
+|---|---|---|
+| green | working | writing to its transcript right now |
+| blue | running | alive; this tool publishes no per-turn activity |
+| amber | your turn | alive and quiet — it is waiting on you |
+| grey | idle | alive but untouched for 15 minutes |
 
 ```
-AGENTS                                    1 working
-✦ Claude        working ×2      ● API ok · 110ms
-⌗ Antigravity   idle            ○ not checked
+$ liddy session
+working   Claude  4s   liddy (main)
+working   Claude  36s  blead (feat/linkedin-job-source)
+running   Grok    26m  biasd
+your turn Claude  1m   blead (feat/linkedin-job-source)
+idle      Claude  26m  booted (main)
 ```
 
-Both halves matter separately. An agent working against a down API is a run burning battery for nothing — the case worth waking up for. An idle agent with a healthy API is just one you are not using. Collapsing them into one "status" would lose exactly that distinction.
+**Why files rather than processes.** A process tells you `claude` is running. It cannot tell you which project, which branch, how many sessions, or whether the model is mid-turn. Every one of these tools already writes a per-session record and stamps it with the working directory — Claude and Codex a JSONL transcript, Cursor a `meta.json`, Grok an explicit `active_sessions.json` with a pid — so the filesystem holds the exact answer, and the modification time is a far better activity signal than CPU. An agent blocked on an API response sits at 0% CPU while genuinely working; its transcript grew two seconds ago.
 
-Idle agents are listed but **not probed**: listing them keeps the panel honest about what Liddy understands, so an agent missing from the list is a visible gap rather than a silent one — while probing only what is working keeps a power utility from firing six requests every thirty seconds. An unprobed agent shows a hollow dot and "not checked", never a green one.
+Processes are still used for one thing: whether a session is *alive*. A transcript is just as fresh five seconds after you quit the CLI as five seconds before, so liveness is matched separately, by working directory.
+
+This replaced a per-vendor Agents list whose working/idle flag came from whether Liddy held a *lease*. That flag was wrong in the worst direction — an agent that was genuinely running read as idle, because no lease exists unless the Claude Code hook claimed one or the process watcher matched a name in `watchPattern` while auto-watch was on and a hold was live. Grok was not in the default pattern at all, so it could never read as working. Session state no longer depends on Liddy being involved.
 
 ### Settings
 
 Every threshold that governs a run is editable in the panel — both battery floors, the thermal ceiling, the idle-release window, charging-only, auto-watch, and network probing. These were `liddy set`-only, which put the numbers deciding whether an overnight run survives behind a command you have to remember. The panel already *draws* the floors (the battery ring turns amber at the soft one), so it should be able to move them.
 
+**Open at login** lives in the same section. A menu-bar app with no Dock icon is otherwise gone after a reboot; Login Items are how it comes back. The toggle is disabled until `Liddy.app` is in `/Applications`, because that is the path macOS resolves.
+
 Changes apply to the live governor immediately, not on next launch: a floor you just raised should protect the run you are in the middle of.
+
+### The panel is five pages, not one scroll
+
+An icon bar along the bottom switches pages: **Now** (the switch, the rings, live sessions), **Apps** (what is eating the machine), **Health**, **Settings**, **Activity**. A dot on the Health glyph means a check is failing, visible from whichever page you are on.
+
+Pages have a fixed height, so the window never resizes — not when a section opens, not when a health sweep lands, not on a tick. That is a deliberate structural choice rather than a style one: every panel bug this project has had (a one-frame jump on expand, a measurement loop that grew the window to fill the screen, content clipped off the top, a 1330pt content height) came from a window whose height was a function of its content. Pages remove the cause. A page with more content than fits scrolls inside the page.
+
+### While a run is going
+
+Three things happen during a hold that you do not have to ask for.
+
+**The screen goes off when the lid shuts.** A closed panel that is still lit is watts and heat spent on a display nobody can see. Liddy reads the kernel's own `AppleClamshellState`, turns the backlight to zero when the lid closes on one of its sessions, and puts it back at exactly the level you left it when the lid opens. The level is saved *once* — re-reading it on a later tick would capture the zero Liddy wrote and restore the panel to black — and it is restored on quit, on a safety stop, and if you turn the feature off mid-run. If the level cannot be read, nothing is dimmed: a brightness that cannot be restored is not worth taking.
+
+There is no public API for this on Apple silicon, so `DisplayServices` is `dlopen`ed and its three symbols looked up at runtime rather than linked. If a future macOS renames them, the feature turns itself off and closed-lid mode keeps working.
+
+**Using the most** lists the apps actually eating the machine, collapsed per app — Chrome's dozen renderers report as one row, which is the only grouping worth reading. It is visibility, not a decision: nothing in the governor reads it, and a CPU threshold driving the hold stays rejected for the reason in [Agent awareness](#agent-awareness-claim-dont-guess) — an agent waiting on an API sits near 0% CPU. The same sample is written into the log at every stop, so "Battery crossed the floor" is followed by the three processes that put it there.
+
+**Backgrounding** (off by default) hides apps while a hold runs and unhides them when it ends. The scope depends on the lid: **open**, it hides only the apps you listed, because you are looking at that desktop. **Shut**, it hides everything that is not keeping the work alive — there is no screen to look at, and that is exactly the window where an idle app's CPU costs battery and heat behind a closed panel with no airflow. Terminals are never hidden (every agent session runs inside one), nor is an app with a live session, nor Liddy or Finder. Hiding, not quitting and not `SIGSTOP`: occluded windows stop drawing and the app becomes a candidate for App Nap, which is the mechanism macOS itself uses. `SIGSTOP` frees more CPU and corrupts a browser session; `renice` cannot be undone without root, so a "temporary" deprioritise would outlive the run. The app you are actually using is never hidden, an app you unhide yourself is not re-hidden, and everything taken is given back on release, on a safety stop, and on quit.
 
 ### Health
 
-Below that is the health panel — collapsed to one dot per group, expanded to every check. **A failing check is never hidden behind the disclosure triangle**; collapsed still spells out anything that is wrong. If any check is down, the menu bar glyph itself becomes a warning triangle: that the Mac is awake is visible everywhere, but that the helper died three hours into an overnight run is visible nowhere else.
+The health panel is **off by default** — a direct user report that the panel was mostly text. The checks still run: a failing one still turns the menu-bar glyph into a warning triangle, and still appears in the panel as a single line you can tap to turn the full section back on. What the toggle controls is whether the *passing* rows are drawn.
+
+With it on — collapsed to one dot per group, expanded to every check. **A failing check is never hidden behind the disclosure triangle**; collapsed still spells out anything that is wrong. If any check is down, the menu bar glyph itself becomes a warning triangle: that the Mac is awake is visible everywhere, but that the helper died three hours into an overnight run is visible nowhere else.
 
 ### Diagnose
 
@@ -159,16 +193,17 @@ liddy doctor     # is this installed correctly, and is anything stuck?
 liddy health     # is everything working right now?
 ```
 
-`doctor` reports CLI/app/helper state, live battery and thermal, your thresholds, everything currently holding a sleep assertion (a stray `caffeinate` from three deploys ago is the usual culprit), and — loudly — a stuck `disablesleep 1` with no helper watching it, plus the command to clear it.
+`doctor` reports whether `Liddy.app` is in `/Applications`, CLI/app/helper state, live battery and thermal, your thresholds, everything currently holding a sleep assertion (a stray `caffeinate` from three deploys ago is the usual culprit), and — loudly — a stuck `disablesleep 1` with no helper watching it, plus the command to clear it.
 
 `health` runs the same sweep the menu bar draws, grouped by what you would have to fix:
 
 ```
 LIDDY  [OK]                          DEVICE  [OK]
-  ✓ CLI socket    ~/.liddy/liddy.sock  ✓ Battery   45% · 3:23 left
-  ✓ Power assertion  held              ✓ Thermal   Normal · ceiling Very hot
-  - Helper daemon    not installed     ✓ Power source  on battery
-  ✓ Sleep policy     normal sleep      ✓ Disk      67.0 GB free
+  ✓ Install       /Applications/Liddy.app  ✓ Battery   45% · 3:23 left
+  ✓ CLI socket    ~/.liddy/liddy.sock  ✓ Thermal   Normal · ceiling Very hot
+  ✓ Power assertion  held              ✓ Power source  on battery
+  - Helper daemon    not installed     ✓ Disk      67.0 GB free
+  ✓ Sleep policy     normal sleep
   - Claude Code hook not installed
 NETWORK  [OK]                        SERVICE  [OK]
   ✓ Link   Wi-Fi                       ✓ Anthropic API     reachable (57ms)
@@ -201,17 +236,20 @@ ln -sf /Applications/Liddy.app/Contents/Helpers/liddy ~/.local/bin/liddy
 That first command is not optional. Releases are **ad-hoc signed, not
 notarised** — notarising needs a paid Apple Developer account — so Gatekeeper
 refuses to launch the app until the quarantine flag is cleared. For the same
-reason the signature changes on every release, and macOS treats each update as
-a new app.
+reason the signature changes on every rebuild, and macOS treats each update as
+a new app — including Login Items, so **Open at login** may need turning back
+on after an ad-hoc rebuild.
 
 Requires macOS 14+ on Apple silicon.
 
 ### From source
 
 ```bash
-./Script/install-cli.sh        # liddy → ~/.local/bin (no sudo; --system for /usr/local/bin)
-./Script/build-app.sh          # → dist/Liddy.app
+./Script/build-app.sh          # → /Applications/Liddy.app and ~/.local/bin/liddy
+./Script/install-cli.sh        # CLI only, no app (no sudo; --system for /usr/local/bin)
 ```
+
+`build-app.sh` copies the bundle into `/Applications` and points `~/.local/bin/liddy` at the copy inside it. A menu-bar-only app left in `dist/` works until you log out, and then it is gone. `SKIP_INSTALL=1` skips that copy (CI already does).
 
 Building with a Developer ID signing identity avoids the quarantine dance —
 `build-app.sh` picks up the first codesigning identity on the machine and falls
@@ -250,6 +288,12 @@ liddy -- <command>               hold for exactly one command, passes its exit c
 liddy setting                    show thresholds
 liddy set --soft-battery 25 --idle-release 5m --charging-only on
 liddy set --network-probe off    stop probing DNS and agent APIs
+liddy set --health-panel on                  draw the passing health checks too
+liddy set --lid-brightness-off on            screen off while the lid is shut
+liddy set --resource-saver on                background heavy apps during a hold
+liddy set --background-app "Google Chrome,Discord"
+liddy top [-n 6]                 what is eating the machine right now
+liddy session                    live CLI agent sessions, per project
 liddy hook install [--project]   hold the Mac only while Claude Code works
 liddy doctor                     check the install, find a stuck disablesleep
 ```
@@ -265,9 +309,30 @@ Sources/LiddyCli/     liddy
 Sources/LiddyHelper/  root daemon: pmset + deadman switch
 Script/              install, build, deadman verification, brand assets
 Asset/ Resource/     banner.png and Liddy.icns, both committed
+site/                the landing page — static, no build step
 ```
 
-`swift build && swift test` — 155 tests, no external dependency.
+`swift build && swift test` — 272 tests, no external dependency.
+
+### Measuring what it costs
+
+A menu-bar utility that watches your battery has no business being the thing that drains it, so the cost is measurable rather than asserted:
+
+```bash
+Script/cpuwatch.sh 180 "Liddy.app/Contents/MacOS/Liddy" "iStat Menus Menubar"
+```
+
+CPU-seconds consumed over a fixed window — what `ps` bills — rather than an instantaneous sample, and it takes any number of process patterns so Liddy can be put beside whatever else is in your menu bar.
+
+For a breakdown by phase, run the app with `LIDDY_PROFILE=1` and it writes one report per minute to stderr, in thread CPU time. The panel has its own harness: `LIDDY_MEASURE_PANEL=open` opens it and reports its geometry every pass, `LIDDY_EXPAND_ALL=1` forces every disclosure, and `LIDDY_TAB=<page>` opens a specific page.
+
+### The site
+
+[liddy.bygelo.com](https://liddy.bygelo.com) lives in `site/` — three files, one
+self-hosted font, no build step and no dependency. Open `site/index.html` in a
+browser to work on it; `./Script/deploy-site.sh` rsyncs it to the box and reloads
+nginx (`--dry-run` to see what would change first). The vhost is committed as
+`Script/site-nginx.conf`.
 
 `./Script/make-asset.sh` re-renders the icon and banner from
 `Script/makeicon.swift` and `Script/makebanner.swift`; both outputs are

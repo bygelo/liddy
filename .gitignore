@@ -4,3 +4,6 @@ DerivedData/
 dist/
 *.dmg
 .DS_Store
+
+# Worker scratch from headless CLI lanes
+.opencode/
